@@ -12,7 +12,13 @@ One private JSON file per knowledge repo. The path comes from the serve config, 
 2. `identity_store = "<path>"` in `<root>/.cockpit/serve.toml`.
 3. Default: `${XDG_STATE_HOME:-~/.local/state}/cockpit-kit/<repo-hash>/identity.json`, next to the intents state.
 
-Configured paths must be absolute or start with `~/`. `parseServeConfig()` returns the result as `identityStore` and refuses to start if the path is inside the served root. The default path is checked the same way, so an `XDG_STATE_HOME` or `HOME` inside the root is refused too. `openIdentityStore()` checks again. Both checks compare the resolved path, so `..` segments cannot lead back into the root, and the real path, so a symlinked directory that points at the root is refused too. A path that goes through the root is also refused, even if a symlink inside the root leads somewhere else.
+Configured paths must be absolute or start with `~/`. `parseServeConfig()` returns the result as `identityStore` and refuses to start if the path is inside the served root. The default path is checked the same way, so an `XDG_STATE_HOME` or `HOME` inside the root is refused too. `openIdentityStore()` checks again.
+
+If no path is configured and neither `HOME` nor `XDG_STATE_HOME` is set, `identityStore` is `null`. Callers, starting with passkey sign-in (#8), must treat `null` as "identity disabled" and fail closed: no sign-in, and never a fallback location.
+
+**Behavior change:** `serve.mjs` refuses to start when the identity store path resolves inside the served root, even though nothing uses identity yet. This includes the default path, so a served root at or above `$HOME` (or above `XDG_STATE_HOME`) stops `serve.mjs` from starting. Fix it by serving a narrower root, or by pointing `--identity-store` (or `identity_store`) at a path outside the root. This is deliberate: the store holds credentials and must never be servable.
+
+**Trust:** `identity_store` in `.cockpit/serve.toml` is trusted the same way `auth` is there. That file lives in the knowledge repo, so anyone who can write to the repo can point the server at a different store after a restart. #8 may accept this setting only from the command line or the user config. Both checks compare the resolved path, so `..` segments cannot lead back into the root, and the real path, so a symlinked directory that points at the root is refused too. A path that goes through the root is also refused, even if a symlink inside the root leads somewhere else.
 
 ## File safety
 

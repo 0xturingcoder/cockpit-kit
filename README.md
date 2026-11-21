@@ -160,7 +160,8 @@ This is a lean first version of the [design](docs/design/operator-comments-and-c
 Groundwork for passkey sign-in: `skill/lib/identity/store.mjs` keeps users (stable opaque id, display name, `owner` or `member` role) and their passkey credentials (credential id, COSE public key, signature counter, transports, created time, label) in one private JSON file per knowledge repo. Nothing uses it for sign-in yet.
 
 - **Where:** `${XDG_STATE_HOME:-~/.local/state}/cockpit-kit/<repo-hash>/identity.json` by default. Override it with `serve.mjs --identity-store <path>` or `identity_store = "<path>"` in `.cockpit/serve.toml`. The path must be absolute (or start with `~/`) and must resolve outside the served root, comparing real paths; otherwise `serve.mjs` refuses to start.
-- **Safety:** writes are atomic (fsynced `0600` temp file, then rename) and serialized by a short lock. Loading refuses symlinks and files with any group or world permission bit (`chmod 600`), and fails closed on anything invalid, including a store without exactly one `owner`. Error messages never include credential material.
+- **Behavior change:** this check runs at every `serve.mjs` start, even though nothing uses identity yet, and it covers the default path. If the served root is at or above `$HOME` (or above `XDG_STATE_HOME`), `serve.mjs` now refuses to start. Serve a narrower root, or set `--identity-store` to a path outside the root.
+- **Safety:** writes are atomic (fsynced `0600` temp file, then rename), serialized by a short token lock, and capped at 1 MiB (`store_full`). Loading refuses symlinks and files with any group or world permission bit (`chmod 600`), and fails closed on anything invalid, including a store without exactly one `owner`. Error messages never include credential material.
 
 Schema, API, and error codes: [`docs/identity-store.md`](docs/identity-store.md).
 

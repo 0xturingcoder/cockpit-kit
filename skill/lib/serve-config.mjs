@@ -148,6 +148,15 @@ export function resolveIdentityStorePath(value, { root, env, source }) {
   return checkOutsideRoot(expanded, root, source);
 }
 
+/**
+ * Resolve serve options from argv, the user config, and .cockpit/serve.toml.
+ *
+ * `identityStore` in the result is the absolute identity store path, always
+ * outside the served root (startup fails otherwise, including for the default
+ * path). It is null when no path is configured and neither HOME nor
+ * XDG_STATE_HOME is set. Callers must treat null as "identity disabled" and
+ * fail closed: no passkey sign-in, never a fallback location.
+ */
 export function parseServeConfig({ argv = [], env, stderr } = {}) {
   if (!env) throw new Error('parseServeConfig requires an explicit env object');
   const flags = parseArgs(argv);
