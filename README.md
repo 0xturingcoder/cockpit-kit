@@ -228,7 +228,7 @@ The GitHub Actions workflow runs `node --test` on Ubuntu and macOS with Node 20 
 - Passkey sign-in (ceremonies, supported subset, config, errors, verifier API): [`docs/passkeys.md`](docs/passkeys.md)
 - Per-device sessions (lifetime, cookie, list and revoke, settings page, intents routes): [`docs/sessions.md`](docs/sessions.md)
 - Invites (one-time links to enroll a member's passkey, lifecycle, routes, errors): [`docs/invites.md`](docs/invites.md)
-- Design (lean MVP implemented, hardening deferred): [Operator comments and capture lifecycle](docs/design/operator-comments-and-capture.md) ([#10](https://github.com/autojeremy/cockpit-kit/issues/10)).
+- Design (lean MVP implemented, hardening deferred): [Operator comments and capture lifecycle](docs/design/operator-comments-and-capture.md) ([autojeremy/cockpit-kit#10](https://github.com/autojeremy/cockpit-kit/issues/10)).
 
 ## Security
 
