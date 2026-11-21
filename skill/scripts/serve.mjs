@@ -52,7 +52,7 @@ Options:
                       Users and passkeys file; must be outside the root
                       (default: per-repo state dir, or serve.toml
                       identity_store)
-  --help             Show this help
+  --help              Show this help
 `;
 }
 
