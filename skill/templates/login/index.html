@@ -17,15 +17,27 @@
       <button type="button" id="sign-in">Sign in with a passkey</button>
     </section>
 
-    <section aria-labelledby="register-heading">
-      <h2 id="register-heading">Add a passkey</h2>
-      <p>For the owner. Open the tokenized URL the server printed first, then add a passkey for this device.</p>
-      <form id="register-form">
-        <label for="display-name">Your name <span class="hint">(only when creating the owner)</span></label>
+    <section aria-labelledby="recover-heading">
+      <h2 id="recover-heading">Recover with the server token</h2>
+      <p>For the owner, if no passkey is at hand. Signs you in for at most 12 hours; adding a passkey or creating an invite then asks you to confirm with a passkey.</p>
+      <form id="recover-form">
+        <label for="recover-token">Recovery token</label>
+        <input id="recover-token" name="token" type="password" autocomplete="off" spellcheck="false" maxlength="64">
+        <button type="submit" id="recover">Recover</button>
+      </form>
+    </section>
+
+    <section aria-labelledby="setup-heading">
+      <h2 id="setup-heading">Create the owner</h2>
+      <p>Only once, before anyone can sign in: give the recovery token the server created, then add the owner's first passkey. To add more passkeys later, sign in and use Devices.</p>
+      <form id="setup-form">
+        <label for="display-name">Your name</label>
         <input id="display-name" name="display_name" autocomplete="name" maxlength="128">
         <label for="label">Device label <span class="hint">(optional)</span></label>
         <input id="label" name="label" maxlength="64">
-        <button type="submit" id="register">Add a passkey</button>
+        <label for="setup-token">Recovery token</label>
+        <input id="setup-token" name="recovery_token" type="password" autocomplete="off" spellcheck="false" maxlength="64">
+        <button type="submit" id="setup">Create the owner</button>
       </form>
     </section>
 

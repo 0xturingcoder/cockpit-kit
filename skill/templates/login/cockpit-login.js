@@ -1,6 +1,9 @@
-// Passkey sign-in and registration for the Cockpit login page.
-// Same-origin only: talks to /auth/passkey/* on this server through the
-// browser's native navigator.credentials API. No third-party code.
+// Passkey sign-in, recovery-token sign-in, and first-owner setup for the
+// Cockpit login page. Same-origin only: talks to /auth/passkey/* on this
+// server through fetch and the browser's native navigator.credentials API.
+// The recovery token is read from a password field, sent only in POST bodies,
+// and never put in a URL, storage, or the console; the field is cleared after
+// each attempt. No third-party code.
 (() => {
   'use strict';
 
@@ -32,6 +35,8 @@
     const res = await fetch(`${API}${path}`, {
       method: 'POST',
       credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
@@ -115,21 +120,53 @@
     }
   };
 
-  const register = async (form, button) => {
+  const recover = async (form, button) => {
+    const input = form.elements.token;
+    const token = input.value.trim();
+    input.value = '';
+    if (!token) {
+      setStatus('Enter the recovery token.', true);
+      return;
+    }
+    busy(button, true);
+    setStatus('Checking the recovery token…');
+    try {
+      await post('/recovery/sign-in', { token });
+      setStatus('Signed in with the recovery token. Opening Devices…');
+      window.location.assign('/auth/settings/');
+    } catch (error) {
+      if (error?.code === 'no_owner') setStatus('There is no owner yet. Create the owner below.', true);
+      else setStatus(describe(error), true);
+    } finally {
+      busy(button, false);
+    }
+  };
+
+  // First-owner setup: the recovery token goes in both POST bodies and is
+  // accepted only while there is no owner.
+  const setup = async (form, button) => {
+    const input = form.elements.recovery_token;
+    const token = input.value.trim();
+    input.value = '';
+    if (!token) {
+      setStatus('Enter the recovery token the server created.', true);
+      return;
+    }
     busy(button, true);
     setStatus('Waiting for your authenticator…');
     try {
       const displayName = form.elements.display_name.value.trim();
-      const options = await post('/register/options', displayName ? { display_name: displayName } : {});
+      const options = await post('/register/options', { display_name: displayName, recovery_token: token });
       const credential = await navigator.credentials.create({ publicKey: creationOptions(options.publicKey) });
-      const body = { challenge_id: options.challenge_id, credential: registrationJson(credential) };
+      const body = { challenge_id: options.challenge_id, credential: registrationJson(credential), recovery_token: token };
       const label = form.elements.label.value.trim();
       if (label) body.label = label;
       await post('/register/verify', body);
-      setStatus('Passkey added. You can now sign in with it.');
+      setStatus('Owner created. You can now sign in with your passkey.');
       form.reset();
     } catch (error) {
-      setStatus(error?.status === 401 ? 'Open the tokenized URL the server printed first, then add a passkey.' : describe(error), true);
+      if (error?.code === 'owner_exists') setStatus('The owner already exists. Sign in, then add passkeys from Devices.', true);
+      else setStatus(describe(error), true);
     } finally {
       busy(button, false);
     }
@@ -137,18 +174,24 @@
 
   const init = () => {
     const signInButton = document.getElementById('sign-in');
-    const form = document.getElementById('register-form');
-    const registerButton = document.getElementById('register');
+    const recoverForm = document.getElementById('recover-form');
+    const recoverButton = document.getElementById('recover');
+    const setupForm = document.getElementById('setup-form');
+    const setupButton = document.getElementById('setup');
+    recoverForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      recover(recoverForm, recoverButton);
+    });
     if (!window.PublicKeyCredential || !navigator.credentials) {
       setStatus('This browser does not support passkeys.', true);
       signInButton.disabled = true;
-      registerButton.disabled = true;
+      setupButton.disabled = true;
       return;
     }
     signInButton.addEventListener('click', () => signIn(signInButton));
-    form.addEventListener('submit', (event) => {
+    setupForm.addEventListener('submit', (event) => {
       event.preventDefault();
-      register(form, registerButton);
+      setup(setupForm, setupButton);
     });
   };
 
