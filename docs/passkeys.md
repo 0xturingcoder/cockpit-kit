@@ -187,7 +187,7 @@ ceremonies.finishAuthentication({ challengeId, response })        // { userId, r
 ## Not in this phase
 
 - Passkeys for members, invites (#10), per-device sessions (#9), and owner recovery (#11).
-- Passkey routes in the standalone `intents-service.mjs`. It runs behind an authenticating reverse proxy that owns sign-in, and it has no session of its own to grant. `createPasskeyApi()` is transport-free, so mounting it there later is small.
+- Passkey routes in the standalone `intents-service.mjs`. The issue scope mentions it, but it has no sign-in surface to cover: it serves only the intents API on loopback, behind an authenticating reverse proxy that owns operator sign-in and forwards the operator as `X-Cockpit-Principal` together with a shared proxy secret. It issues no cookie and has no session, login page, or token of its own, so a passkey sign-in there would have nothing to grant; sign-in belongs to the proxy (or to `serve.mjs --passkeys`). `createPasskeyApi()` is transport-free, so if the service later gets its own sessions (for example with #9), mounting the routes there is small.
 - Attestation formats other than `none`, algorithms other than ES256 and RS256, cross-origin iframes, and conditional (autofill) UI.
 
 ## Tests
