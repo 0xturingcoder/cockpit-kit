@@ -2,7 +2,7 @@
 
 Phase 1 of passkeys and identity. The store records who may sign in to a Cockpit: users, their role, and the passkey (WebAuthn) credentials each user has registered. Later features (passkey sign-in, sessions, invites) read identities only through the API below, so the JSON file can be swapped for a small database without changing callers.
 
-Passkey registration and sign-in ([`passkeys.md`](passkeys.md), `serve.mjs --passkeys`) use this store: registration calls `createUserWithCredential` (for the first owner) or `addCredential`, and sign-in calls `load`, `findCredential`, and `updateCounter`.
+Passkey registration and sign-in ([`passkeys.md`](passkeys.md), `serve.mjs --passkeys`) use this store: registration calls `createUserWithCredential` (for the first owner) or `addCredential`, and sign-in calls `load`, `findCredential`, and `updateCounter`. Per-device sessions ([`sessions.md`](sessions.md)) check each session's user with `load` and `findUser`, and the owner's passkey removal calls `removeCredential`. Sessions are kept in a separate file, `sessions.json`, in the same directory as this store, written with the same file safety (`skill/lib/identity/private-file.mjs`).
 
 ## Location
 
