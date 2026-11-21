@@ -67,7 +67,7 @@ Members get their first passkey through a one-time invite link that the owner cr
 
 1. `POST /auth/passkey/invite/options` with `{ token }`. Returns `{ challenge_id, publicKey }` with the same creation options as registration, for the invite's pre-generated user, and an empty `excludeCredentials`.
 2. The invite page calls `navigator.credentials.create()`.
-3. `POST /auth/passkey/invite/verify` with `{ token, challenge_id, credential, label?: string }`. The server verifies the response like a registration, spends the invite, writes the member and the passkey in one store write, and creates a session. Returns `201 { enrolled: true, signed_in, user_id }` and, when `signed_in` is true, the `cockpit_session` cookie.
+3. `POST /auth/passkey/invite/verify` with `{ token, challenge_id, credential, label?: string }`. The server verifies the response like a registration, claims the invite, writes the member and the passkey in one store write, deletes the invite, and creates a session. Returns `201 { enrolled: true, signed_in, user_id }` and, when `signed_in` is true, the `cockpit_session` cookie.
 
 The challenge is bound to the invite (the `invitation` ceremony), and the token must name that same invite at verify. Every invalid case returns one `400 invite_invalid`. Details, lifecycle, and the invite page: [`invites.md`](invites.md).
 

@@ -37,8 +37,9 @@ send url privately  ────────────────────
                                      issue challenge bound to it ──► 200 { challenge_id, publicKey }
                                                                      navigator.credentials.create()
                                      ◄── POST /auth/passkey/invite/verify { token, challenge_id, credential, label? }
-                                     verify response, spend invite,
+                                     verify response, claim invite,
                                      create member + passkey,
+                                     delete invite,
                                      create session ───────────────► 201 + Set-Cookie: cockpit_session=...
 ```
 
@@ -72,9 +73,10 @@ The invite page's script reads the token from `location.hash`, immediately calls
 3. `POST /auth/passkey/invite/verify` with `{ token, challenge_id, credential, label? }`. The server:
    1. consumes the challenge (single use, two minutes, `invitation` ceremony only);
    2. verifies the registration response exactly as for owner registration ([supported subset](passkeys.md#supported-subset));
-   3. spends the invite under the invites lock: the token must hash to a pending, unexpired invite whose id is the one the challenge was issued for, and that invite is deleted;
+   3. claims the invite under the invites lock: the token must hash to a pending (unexpired, unclaimed) invite whose id is the one the challenge was issued for, and that invite is marked claimed;
    4. writes the member and the passkey in one identity store write (`createUserWithCredential` with the invite's user id, display name, and the `member` role);
-   5. creates a session for the new passkey, as a sign-in does, and returns `201 { enrolled: true, signed_in: true, user_id }` with the `cockpit_session` cookie.
+   5. deletes the claimed invite;
+   6. creates a session for the new passkey, as a sign-in does, and returns `201 { enrolled: true, signed_in: true, user_id }` with the `cockpit_session` cookie.
 
 If the session cannot be saved (for example the sessions store is busy), the member and passkey still exist and the invite is spent: the response is `201 { enrolled: true, signed_in: false, user_id }` without a cookie, and the page tells them to sign in at `/auth/login/`.
 
@@ -82,12 +84,14 @@ A browser that already has a session (for example another member's) can enroll; 
 
 ## Lifecycle and guarantees
 
-- **Single use.** The invite is spent only after the registration response has verified, so a cancelled prompt or a bad response leaves it pending for another try. Spending re-reads the file and deletes the invite under its lock, so of any number of concurrent enrollments with one invite, in this process or another, exactly one gets it; the others get `invite_invalid`. The pre-generated user id makes the identity write single-winner too: a second write for the same user id fails with `duplicate_id` under the identity store lock.
+- **Single use.** The invite is spent only after the registration response has verified, so a cancelled prompt or a bad response leaves it pending for another try. Spending re-reads the file and claims the invite under its lock, so of any number of concurrent enrollments with one invite, in this process or another, exactly one gets it; the others get `invite_invalid`. The pre-generated user id makes the identity write single-winner too: a second write for the same user id fails with `duplicate_id` under the identity store lock.
 - **Bound to its user.** The challenge is bound to the invite and its user when options are issued, and at verify the token must hash to that same invite. A challenge obtained with one invite's token cannot be finished with another invite's token (the request is refused and neither invite is spent), and nothing the client sends can change the user id, name, or role.
 - **Expiry.** Each invite expires at `created_at + lifetime`, fixed when it is created. Expiry is checked when options are issued and again when the invite is spent, so options obtained just before expiry cannot be finished after it. Expired invites are ignored on read and pruned on every write.
-- **Revocation.** Revoking deletes the invite. An enrollment already in progress then fails at verify with `invite_invalid` and creates no user.
-- **Retries.** If the identity write fails with `store_busy` or `store_full`, no user was created, so the invite is put back (if it has not expired meanwhile) and the invitee can retry with the same link. Any other failure after the invite was spent leaves it spent; the owner can create a new one. If the server stops between spending the invite and writing the user, the invite is lost and no user exists.
-- **Indistinguishable failures.** Spent and revoked invites are deleted and expired ones are ignored, so on every route they look exactly like an invite that never existed.
+- **Claims.** Between being spent and the member being written, an invite is *claimed*: its record stays in the file with a `claimed_at` time, but `find`, `list`, and `spend` skip it, so to every caller it looks exactly like an unknown invite. A successful enrollment deletes it. A failed one either clears the claim (see Retries) or leaves it to be pruned.
+- **Revocation always wins.** Revoking deletes the invite whether it is pending or claimed, and returns `{ revoked: true }` either way. Clearing a claim only works on a record that still exists, so an invite revoked while an enrollment holds its claim, in this process or another, stays revoked even if that enrollment then fails and retries; the link gets `invite_invalid`. An enrollment that has not claimed the invite yet fails at verify with `invite_invalid` and creates no user.
+- **Retries.** If the identity write fails with `store_busy` or `store_full`, no user was created, so the claim is cleared and the invitee can retry with the same link, unless the invite was revoked or expired meanwhile or its claim lease ran out. Any other failure after the invite was claimed leaves it claimed until it is pruned; the owner can create a new one.
+- **Claim lease.** A claim lasts at most 5 minutes. A claim left behind by a server that stopped between claiming the invite and finishing (with or without writing the user) is pruned by the next write after the lease, so the invite is gone, not put back, and it never blocks a revoke or lives past its lease. Expiry prunes it in any case.
+- **Indistinguishable failures.** Spent and revoked invites are deleted, claimed ones are hidden, and expired ones are ignored, so on every route they look exactly like an invite that never existed.
 
 ## Keeping the token out of logs and referrers
 
@@ -105,7 +109,7 @@ Account API (under `/auth/account`, owner only, with the account API's checks: a
 | --- | --- |
 | `GET /auth/account/invites` | `{ invites: [{ id, user_id, display_name, role, created_by, created_at, expires_at }] }`: pending invites. No tokens or hashes. |
 | `POST /auth/account/invites` `{ display_name }` | `201 { invite, url }`. |
-| `POST /auth/account/invites/revoke` `{ invite_id }` | `{ revoked: true }`; `404 invite_not_found` for an unknown, spent, or expired invite. |
+| `POST /auth/account/invites/revoke` `{ invite_id }` | `{ revoked: true }` for a pending invite or one an enrollment has claimed; `404 invite_not_found` for an unknown, spent, or expired invite. |
 
 Enrollment (under `/auth/passkey`, with the passkey API's checks: `POST`, exact `Origin`, `Sec-Fetch-Site: same-origin` when present, JSON bodies of at most 64 KiB, no query string; see [passkeys.md, Requests](passkeys.md#requests)):
 
@@ -124,7 +128,7 @@ Page: `GET /auth/invite/` (and its script `/auth/invite/cockpit-invite.js`), ser
 | 400 | `invalid_request` | Enrollment: the body is not a JSON object, `challenge_id` or `credential` is missing, or `label` breaks the label rules. Account API: a bad `display_name` or `invite_id`. |
 | 401 | `session_required` | Account API without a live session, including the server-token cookie alone. |
 | 403 | `forbidden` / `csrf_invalid` / `origin_denied` | A member calling the invite routes; a missing or wrong CSRF token; wrong `Origin` or fetch metadata. |
-| 404 | `invite_not_found` | Revoking an invite that is not pending. |
+| 404 | `invite_not_found` | Revoking an invite that is neither pending nor claimed. |
 | 409 | `too_many_invites` | Creating a 33rd pending invite. Revoke one first. |
 | 429 | `rate_limited` | The invite options or failures bucket is empty (`Retry-After`). |
 | 503 | `store_busy` | A store lock stayed busy for 1 second. Retry. |
@@ -171,8 +175,10 @@ The invites file is always `invites.json` next to the identity store (by default
 }
 ```
 
-- **File safety:** the same code as the identity and sessions stores (`skill/lib/identity/private-file.mjs`): mode `0600` in a directory that is not a symlink and not writable by group or others, atomic temp-file-and-rename writes, a lock file for each change with a re-read under the lock, a 1 MiB cap, and loading that fails closed on any unknown field, bad value, a role other than `member`, a duplicate id, hash, or user id, more than 32 records, or an unsupported `schema_version`. See [identity-store.md, File safety](identity-store.md#file-safety).
-- **Limits:** at most 32 pending invites. Every write prunes expired invites first, so they never count against the limit.
+While an enrollment holds an invite, its record also has `"claimed_at"`, the ISO 8601 UTC time it was claimed, from `created_at` up to (not including) `expires_at`. It is the only optional field.
+
+- **File safety:** the same code as the identity and sessions stores (`skill/lib/identity/private-file.mjs`): mode `0600` in a directory that is not a symlink and not writable by group or others, atomic temp-file-and-rename writes, a lock file for each change with a re-read under the lock, a 1 MiB cap, and loading that fails closed on any unknown field, bad value, a role other than `member`, a `claimed_at` that is not a timestamp within the invite's lifetime, a duplicate id, hash, or user id, more than 32 records, or an unsupported `schema_version`. See [identity-store.md, File safety](identity-store.md#file-safety).
+- **Limits:** at most 32 pending or claimed invites. Every write prunes expired invites and claims past their lease first, so they never count against the limit.
 - **Lookups:** a token is looked up only after a strict format check (43 base64url characters), by its SHA-256 hash.
 - **Blocking:** the API is synchronous like the other stores; `serve.mjs` waits at most 1 second for the lock and then returns `503 store_busy`.
 
@@ -185,9 +191,10 @@ const invites = openInviteStore({ file, root, lifetimeMs, lockWaitMs: 1000 });
 const { token, invite } = invites.create({ displayName, createdBy }); // token: for the link, never stored
 invites.list();                   // pending invites, no hashes
 invites.find(token);              // pending invite, or null; does not write
-invites.spend(token, inviteId);   // deletes and returns the invite, or null; single winner
-invites.restore(token, invite);   // puts a spent invite back after a retryable failure; true or false
-invites.revoke(inviteId);         // removed invite, or null
+invites.spend(token, inviteId);   // claims and returns the invite, or null; single winner
+invites.complete(token, inviteId); // deletes a claimed invite after enrollment; true or false
+invites.restore(token, inviteId); // clears a claim after a retryable failure, if the record still exists; true or false
+invites.revoke(inviteId);         // deletes a pending or claimed invite and returns it, or null
 ```
 
 `openInviteStore({ file, root, now?, lifetimeMs?, lockWaitMs?, lockStaleMs? })` checks that `file` is absolute and outside `root`. Errors are `InviteStoreError` with a `code`: `invalid_store`, `unsupported_schema`, `duplicate_id`, `invalid_argument`, `too_many_invites`, `unsafe_path`, `unsafe_file`, `unsafe_permissions`, `unreadable`, `store_busy`, or `store_full`.
@@ -204,5 +211,6 @@ The ceremonies are `startInvitation({ token })` and `finishInvitation({ token, c
 
 ## Tests
 
-- `test/invites.test.mjs`: the store, including hashing, single use, expiry with an injected clock, pruning, the pending cap, revocation, restore, fail-closed loading, file safety, and two processes spending one invite at once.
-- `test/invite-serve.test.mjs`: `serve.mjs` end to end with synthetic credentials generated at runtime: owner-only creation, enrollment of the bound member, single use, expiry, revocation (including mid-enrollment), wrong user, replay of the verify body and of the token, concurrent enrollments with exactly one winner, one byte-identical error for every invalid case, member and server-token callers refused, the retry paths, the invite page headers and script, the token absent from every response except create and from log lines and the CLI's stderr, separate rate-limit buckets and challenge capacity, and `--invite-lifetime` parsing.
+- `test/invites.test.mjs`: the store, including hashing, single use, expiry with an injected clock, pruning, the pending cap, revocation, claims (hidden from find, list, and spend; complete; restore; the claim lease; revoke winning over restore, also from another process), fail-closed loading, file safety, and two processes spending one invite at once.
+- `test/invite-serve.test.mjs`: `serve.mjs` end to end with synthetic credentials generated at runtime: owner-only creation, enrollment of the bound member, single use, expiry, revocation (including mid-enrollment), wrong user, replay of the verify body and of the token, concurrent enrollments with exactly one winner, one byte-identical error for every invalid case, member and server-token callers refused, the retry paths (`503 store_busy` and `507 store_full`), revoking a claimed invite and a revoke from another process during a failed enrollment, the invite page headers and script, the token absent from every response except create and from log lines and the CLI's stderr, separate rate-limit buckets (bad option tokens draining the bucket that limits verify) and challenge capacity, and `--invite-lifetime` parsing.
+- `test/invite-page.test.mjs`: the invite page script and the settings page's invite link run in `node:vm` with stubbed browser APIs: the fragment is stripped before the first request, the token appears in no URL or navigation and only in POST bodies, storage, cookies, and the console are untouched, and a shown invite link is cleared on `pagehide`.
