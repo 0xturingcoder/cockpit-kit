@@ -13,7 +13,7 @@ Phase 1 of passkeys and identity, after [passkey sign-in](passkeys.md), [per-dev
 | Step-up | A fresh, user-verified assertion from one of the owner's passkeys, by a signed-in owner session. Fresh for `--step-up-window` (default 5 minutes). A passkey sign-in counts as a step-up when it happens. |
 | Needs a fresh step-up | Adding a passkey, creating an invite, and (#13) approving or revoking delegations. From every session kind. |
 | Rate limit | Every recovery-token attempt takes a token from one shared bucket: 5 at once, refilling at 5 per minute. Then `429 rate_limited` with `Retry-After`. |
-| Audit log | `audit.json` next to the identity store: the last 200 `{ at, event, result }` entries. No token, hash, IP address, or User-Agent. Shown to the owner on `/auth/settings/` and at `GET /auth/account/audit`. |
+| Audit log | `audit.json` next to the identity store: at most 200 `{ at, event, result }` entries; failed attempts are dropped before anything else, so a flood of them cannot push out a successful or security-relevant entry ([retention](#retention)). No token, hash, IP address, or User-Agent. Shown to the owner on `/auth/settings/` and at `GET /auth/account/audit`. |
 | Rotation | `serve.mjs --passkeys --rotate-token`: new token, every recovery session ended, old token refused, printed once. |
 
 ## Keeping the token offline
@@ -132,11 +132,21 @@ The owner's last passkey cannot be removed, but a lost or broken device can stil
 | --- | --- |
 | `ok` | Succeeded. |
 | `invalid` | Wrong, malformed, or missing token. |
-| `rate_limited` | The shared bucket was empty. Written at most once per minute per event, so a flood does not push out older entries. |
+| `rate_limited` | The shared bucket was empty. Written at most once per minute per event. |
 | `no_owner` | A correct token, but there is no owner to sign in yet. |
 | `owner_exists` | A correct token used to create the owner when one already exists. |
 
-The log keeps the newest 200 entries; the oldest is dropped on write. Entries hold nothing else: no token, hash, IP address, User-Agent, or session id. A **successful** token sign-in is refused with `503 audit_unavailable` (and no session) if its entry cannot be written; a refused attempt that cannot be logged is still refused, and the write failure goes to stderr as a code. The owner reads the log under **Recovery activity** on `/auth/settings/`, or at `GET /auth/account/audit` (`{ events: [...] }`, newest first; members get `403 forbidden`).
+Entries hold nothing but those three fields: no token, hash, IP address, User-Agent, or session id. A **successful** token sign-in is refused with `503 audit_unavailable` (and no session) if its entry cannot be written; a refused attempt that cannot be logged is still refused, and the write failure goes to stderr as a code. The owner reads the log under **Recovery activity** on `/auth/settings/`, or at `GET /auth/account/audit` (`{ events: [...] }`, newest first; members get `403 forbidden`).
+
+### Retention
+
+The log holds at most 200 entries. Each is either a **failed attempt** (a `token_sign_in` or `first_owner` entry whose result is `invalid` or `rate_limited`) or **notable** (everything else: every `ok`, `no_owner`, and `owner_exists` result, and every `token_rotated` and `recovery_enroll` entry). When a write would make 201 entries:
+
+1. the oldest failed attempt is dropped, so failed attempts keep only the newest ones that fit;
+2. only if there are no failed attempts left (notable entries alone fill the log) is the oldest notable entry dropped, to make room for a newer notable one;
+3. a new failed attempt that finds the log full of notable entries is not written.
+
+So no number of failed attempts, which anyone who can reach the login page can make, can push a successful sign-in or any other notable entry out of the log; only 200 newer notable entries can. A damaged log is not trimmed or rewritten: reads and writes fail closed.
 
 ## Routes and errors
 
@@ -173,7 +183,7 @@ recovery.rotate();       // { token, createdAt }
 recovery.check(token);   // true or false; strict format check, constant-time hash compare
 recovery.createdAt();    // ms or null
 const audit = openAuditLog({ file, root });          // audit.json
-audit.record('token_sign_in', 'ok');                 // false when a rate_limited entry is coalesced
+audit.record('token_sign_in', 'ok');                 // false when a rate_limited entry is coalesced, or a failed attempt finds no room
 audit.list();                                        // newest first
 ```
 
@@ -187,7 +197,7 @@ Both throw `RecoveryStoreError` with a `code` (`invalid_store`, `unsupported_sch
 
 ## Tests
 
-- `test/recovery.test.mjs`: the token file and audit log: creation once, rotation (including over a damaged file), format checks, audit bounds and coalescing, fail-closed loading, concurrent first starts, and nothing secret on disk.
-- `test/recovery-serve.test.mjs`: `serve.mjs` end to end: owner-only recovery sessions, the gate with no, stale, and fresh step-ups on registration and invites, step-up binding and member refusal, member precedence over a token, the account API from a recovery session, rate limits and audit entries, audit fail-closed, rotation (including when the revoke fails), `--recovery-enroll`, `--step-up-window`, the CLI output, and the token absent from responses, log lines, and files.
+- `test/recovery.test.mjs`: the token file and audit log: creation once, rotation (including over a damaged file), format checks, audit bounds, failures-first retention under a flood, and coalescing, fail-closed loading, concurrent first starts, and nothing secret on disk.
+- `test/recovery-serve.test.mjs`: `serve.mjs` end to end: owner-only recovery sessions, the gate with no, stale, and fresh step-ups on registration and invites, step-up binding and member refusal, member precedence over a token, the account API from a recovery session, rate limits and audit entries, a 40-minute flood that leaves the successful sign-in in the log, audit fail-closed, rotation (including when the revoke fails), `--recovery-enroll`, `--step-up-window`, the CLI output, and the token absent from responses, log lines, and files.
 - `test/recovery-page.test.mjs`: the login and settings page scripts in `node:vm`: the token only in POST bodies, the step-up retry, the recovery banner, and the activity list built with `textContent`.
 - `test/passkey-ceremonies.test.mjs`: the step-up ceremony and session-bound registration challenges.
