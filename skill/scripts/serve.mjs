@@ -422,6 +422,7 @@ function createIdentity(server, config, { csrfSecret, log, now }) {
       label: deviceLabel({ credentialLabel: result.credentialLabel, userAgent: req.headers['user-agent'] }),
     }), origin),
     log,
+    now,
   });
   const account = createAccountApi({
     auth: sessionAuth,
@@ -445,7 +446,7 @@ function createIdentity(server, config, { csrfSecret, log, now }) {
 const logToStderr = (message) => process.stderr.write(`${message}\n`);
 
 // `now` is the clock for sessions, invite expiry, the step-up window, the
-// recovery enrollment window, and the audit log (tests).
+// recovery enrollment window, the passkey rate limits, and the audit log (tests).
 //
 // With --passkeys the per-start token no longer authenticates anything: the
 // ?token= URL and the cockpit_serve cookie are ignored, so the token never
