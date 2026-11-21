@@ -49,7 +49,7 @@ The proxy must still present a loopback `Host` header, as for any `serve.mjs` re
 
 ### Registration (owner only)
 
-Registration needs the existing operator session (the token cookie). If the identity store does not exist yet, the first registration creates the owner; after that, registration adds a passkey to the owner. Members get passkeys through invites (#10).
+Registration needs the existing operator session (the token cookie). If the identity store does not exist yet, the first registration creates the owner, writing the owner and the passkey in one store write so a failed first registration leaves no store behind; after that, registration adds a passkey to the owner. Members get passkeys through invites (#10).
 
 1. `POST /auth/passkey/register/options` with `{ "display_name"?: string }`. Returns `{ challenge_id, publicKey }`, where `publicKey` is `PublicKeyCredentialCreationOptions` with base64url binary fields: `rp`, `user` (the user handle is the UTF-8 user id), `challenge`, `pubKeyCredParams` (-7, then -257), `timeout`, `attestation: "none"`, `authenticatorSelection` (`residentKey: "required"`, `userVerification: "required"`), and `excludeCredentials` (the owner's existing passkeys).
 2. The page calls `navigator.credentials.create()`.

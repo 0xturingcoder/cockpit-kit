@@ -119,14 +119,18 @@ export const createPasskeyCeremonies = ({
     const { challenge, binding } = challenges.consume(challengeId, 'registration');
     const rp = relyingParty();
     const verified = verifyRegistration({ response, expectedChallenge: challenge, rpId: rp.rpId, origins: [...rp.origins] });
-    if (binding.createOwner) store.createUser({ id: binding.userId, displayName: binding.displayName, role: 'owner' });
-    const credential = store.addCredential(binding.userId, {
+    const input = {
       id: verified.credentialId,
       publicKey: verified.publicKey,
       counter: verified.counter,
       transports: verified.transports,
       label,
-    });
+    };
+    // The owner and their first passkey are written together, so a failed
+    // first registration leaves no store behind.
+    const credential = binding.createOwner
+      ? store.createUserWithCredential({ id: binding.userId, displayName: binding.displayName, role: 'owner', credential: input }).credential
+      : store.addCredential(binding.userId, input);
     return Object.freeze({ userId: binding.userId, credentialId: credential.id, createdOwner: binding.createOwner });
   };
 

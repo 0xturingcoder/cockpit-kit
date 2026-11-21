@@ -2,7 +2,7 @@
 
 Phase 1 of passkeys and identity. The store records who may sign in to a Cockpit: users, their role, and the passkey (WebAuthn) credentials each user has registered. Later features (passkey sign-in, sessions, invites) read identities only through the API below, so the JSON file can be swapped for a small database without changing callers.
 
-Passkey registration and sign-in ([`passkeys.md`](passkeys.md), `serve.mjs --passkeys`) use this store: registration calls `createUser` (for the first owner) and `addCredential`, and sign-in calls `load`, `findCredential`, and `updateCounter`.
+Passkey registration and sign-in ([`passkeys.md`](passkeys.md), `serve.mjs --passkeys`) use this store: registration calls `createUserWithCredential` (for the first owner) or `addCredential`, and sign-in calls `load`, `findCredential`, and `updateCounter`.
 
 ## Location
 
@@ -112,6 +112,7 @@ const hit = findCredential(data, credential.id); // { user, credential } or null
 | `openIdentityStore({ file, root, now?, lockWaitMs?, lockStaleMs? })` | Checks that `file` is absolute and outside `root`, then returns a frozen store object. Nothing is read or written yet. `now` is an optional clock for tests. `lockWaitMs` (default 5000) is how long a change waits for a busy lock, and `lockStaleMs` (default 30000) is the age after which a lock counts as abandoned. |
 | `store.load()` | Reads and fully validates the file. Returns a copy of the document. Throws `missing` if the file does not exist. |
 | `store.createUser({ displayName, role = 'member', id? })` | Adds an enabled user with no credentials. The first user must be the `owner`, and creating it creates the file. A second owner is refused. |
+| `store.createUserWithCredential({ displayName, role = 'member', id?, credential })` | `createUser` and `addCredential` in one locked write, returning `{ user, credential }`. If either step fails (for example a bad label, a duplicate credential id, or `store_busy`), nothing is written, so a user is never left without the credential. The first owner can be created this way. |
 | `store.addCredential(userId, { id, publicKey, counter = 0, transports = [], label = '' })` | Registers a credential for an enabled user. The credential id must not exist for any user. |
 | `store.updateCounter(credentialId, counter)` | Stores a newer signature counter. The counter only moves forward: a value less than or equal to the stored one throws `counter_regression`, which the caller should treat as a possibly cloned authenticator. `0` to `0` is accepted without writing, because authenticators without a counter always report 0. Refused for disabled users. |
 | `store.removeCredential(credentialId)` | Removes the credential and returns it. Allowed for disabled users. |

@@ -276,6 +276,14 @@ const applyAddCredential = (data, userId, { id, publicKey, counter = 0, transpor
 
 // WebAuthn signature counters only move forward. Authenticators that do not
 // implement a counter always report 0; 0 -> 0 is accepted as a no-op.
+// One write for a new user and their first credential, so a bad credential
+// never leaves a user without one.
+const applyCreateUserWithCredential = (data, { id, displayName, role, credential, now }) => {
+  const created = applyCreateUser(data, { id, displayName, role, now });
+  const added = applyAddCredential(created.data, created.result.id, { ...credential, now });
+  return { data: added.data, result: { user: findUser(added.data, created.result.id), credential: added.result } };
+};
+
 const applyUpdateCounter = (data, credentialId, counter) => {
   checkCounter(counter, 'counter', ARG);
   const { userIndex, credentialIndex } = credentialPosition(data, credentialId);
@@ -658,6 +666,10 @@ export const openIdentityStore = ({
       (data) => applyCreateUser(data, { id, displayName, role, now }),
       { allowMissing: true },
     ),
+    createUserWithCredential: ({ id, displayName, role = 'member', credential = {} } = {}) => mutate(
+      (data) => applyCreateUserWithCredential(data, { id, displayName, role, credential, now }),
+      { allowMissing: true },
+    ),
     addCredential: (userId, credential = {}) => mutate((data) => applyAddCredential(data, userId, { ...credential, now })),
     updateCounter: (credentialId, counter) => mutate((data) => applyUpdateCounter(data, credentialId, counter)),
     removeCredential: (credentialId) => mutate((data) => applyRemoveCredential(data, credentialId)),
@@ -691,6 +703,8 @@ export const openIdentityStore = ({
  * @property {() => IdentityData} load Read and validate the whole store.
  * @property {(input: { displayName: string, role?: 'owner' | 'member', id?: string }) => IdentityUser} createUser
  *   Add a user (generated id unless `id` is given). The first user must be the owner and creates the file.
+ * @property {(input: { displayName: string, role?: 'owner' | 'member', id?: string, credential: object }) => { user: IdentityUser, credential: IdentityCredential }} createUserWithCredential
+ *   createUser and addCredential in one write: if either fails, nothing is written.
  * @property {(userId: string, input: { id: Uint8Array | string, publicKey: Uint8Array | string, counter?: number, transports?: string[], label?: string }) => IdentityCredential} addCredential
  *   Register a credential for an enabled user.
  * @property {(credentialId: string, counter: number) => IdentityCredential} updateCounter

@@ -341,6 +341,28 @@ test('ceremony: registering the same credential twice fails with duplicate_id; b
   assert.throws(() => h.registerOwner(makeCredential(), { label: 'x'.repeat(65) }), errorCode(IdentityStoreError, 'invalid_argument'));
 });
 
+test('ceremony: a failed first registration leaves no store, and a later valid registration creates the owner', () => {
+  const h = harness({ lockWaitMs: 50 });
+  const missing = errorCode(IdentityStoreError, 'missing');
+  for (const label of ['x'.repeat(65), 42, ['laptop'], 'bad\u202Elabel']) {
+    assert.throws(() => h.registerOwner(makeCredential(), { displayName: 'Wrong Name', label }), errorCode(IdentityStoreError, 'invalid_argument'));
+    assert.throws(() => h.store.load(), missing);
+  }
+  fs.mkdirSync(path.dirname(h.file), { recursive: true });
+  fs.writeFileSync(`${h.file}.lock`, 'held-by-another-writer');
+  assert.throws(() => h.registerOwner(makeCredential(), { displayName: 'Wrong Name' }), errorCode(IdentityStoreError, 'store_busy'));
+  fs.rmSync(`${h.file}.lock`);
+  assert.throws(() => h.store.load(), missing);
+
+  const credential = makeCredential();
+  const { result } = h.registerOwner(credential, { label: 'Test laptop' });
+  assert.equal(result.createdOwner, true);
+  const [owner] = h.store.load().users;
+  assert.equal(owner.display_name, 'Ada Example');
+  assert.deepEqual(owner.credentials.map((c) => c.label), ['Test laptop']);
+  assert.equal(h.ceremonies.finishAuthentication(h.signInResponse(credential, { userId: result.userId })).userId, result.userId);
+});
+
 test('ceremony: a busy identity store surfaces store_busy instead of blocking for long', () => {
   const h = harness({ lockWaitMs: 50 });
   const credential = makeCredential();

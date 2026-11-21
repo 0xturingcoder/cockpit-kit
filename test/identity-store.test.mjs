@@ -195,6 +195,31 @@ test('addCredential stores base64url credential ids and COSE public keys', () =>
   assert.equal(findCredential(store.load(), 'AAAA'), null);
 });
 
+test('createUserWithCredential writes a user and their first credential together, or nothing', () => {
+  const { root, file } = makeLayout();
+  const store = openIdentityStore({ file, root });
+  const missing = (error) => error instanceof IdentityStoreError && error.code === 'missing';
+  for (const bad of [{ label: 'x'.repeat(65) }, { label: 42 }, { publicKey: 'AAAA' }, { counter: -1 }, { transports: 'usb' }]) {
+    assert.throws(() => store.createUserWithCredential({ displayName: 'Ada Example', role: 'owner', credential: credential(bad) }),
+      (error) => error instanceof IdentityStoreError && error.code === 'invalid_argument', JSON.stringify(Object.keys(bad)));
+    assert.throws(() => store.load(), missing);
+  }
+  assert.throws(() => store.createUserWithCredential({ displayName: ' ', role: 'owner', credential: credential() }),
+    (error) => error instanceof IdentityStoreError && error.code === 'invalid_argument');
+  assert.throws(() => store.load(), missing);
+
+  const input = credential();
+  const { user, credential: added } = store.createUserWithCredential({ displayName: 'Ada Example', role: 'owner', credential: input });
+  assert.equal(user.role, 'owner');
+  assert.equal(user.credentials.length, 1);
+  assert.equal(added.id, input.id.toString('base64url'));
+  assert.deepEqual(store.load().users.map((u) => [u.id, u.credentials.length]), [[user.id, 1]]);
+  // A duplicate credential id fails as a whole: the member is not created.
+  assert.throws(() => store.createUserWithCredential({ displayName: 'Test Member', credential: input }),
+    (error) => error instanceof IdentityStoreError && error.code === 'duplicate_id');
+  assert.equal(store.load().users.length, 1);
+});
+
 test('addCredential rejects duplicate ids across users and bad input without echoing it', () => {
   const { store, owner, member } = seeded();
   const input = credential();
