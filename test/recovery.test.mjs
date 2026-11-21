@@ -94,6 +94,10 @@ test('recovery: an invalid, unsafe, or unknown-schema file fails closed and is n
   assertCode(() => recovery.createdAt(), 'invalid_store');
   replaceFile(file, '{not json');
   assertCode(() => recovery.check(token), 'invalid_store');
+  // Rotation replaces a corrupt file, so the operator can always recover.
+  const rotated = recovery.rotate();
+  assert.equal(recovery.check(rotated.token), true);
+  assert.equal(recovery.check(token), false);
   replaceFile(file, doc);
   fs.chmodSync(file, 0o644);
   assertCode(() => recovery.check(token), 'unsafe_permissions');

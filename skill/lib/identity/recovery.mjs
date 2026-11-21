@@ -175,19 +175,22 @@ export const openRecoveryStore = ({
     return data;
   };
 
-  // Write a new token under the lock unless `keep(current)` says to keep the
-  // current one. Returns the new token, or null when nothing was written.
-  const replace = (keep) => {
+  // Write a new token under the lock. With `onlyIfMissing`, keep an existing
+  // file (and refuse an invalid one); otherwise replace whatever is there, so
+  // rotation also recovers from a corrupt file. Returns the new token, or
+  // null when nothing was written.
+  const replace = ({ onlyIfMissing }) => {
     checkPath(storeFile);
     recoveryFile.ensureDir(dir);
     return recoveryFile.withLock(lockFile, { waitMs: lockWaitMs, staleMs: lockStaleMs }, (isHeld) => {
-      let current = null;
-      try {
-        current = validateRecoveryData(recoveryFile.read(storeFile));
-      } catch (error) {
-        if (error.code !== 'missing') throw error;
+      if (onlyIfMissing) {
+        try {
+          validateRecoveryData(recoveryFile.read(storeFile));
+          return null;
+        } catch (error) {
+          if (error.code !== 'missing') throw error;
+        }
       }
-      if (keep(current)) return null;
       const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
       const createdAt = iso(now());
       const next = validateRecoveryData({ schema_version: RECOVERY_SCHEMA_VERSION, token_hash: hashToken(token), created_at: createdAt });
@@ -206,11 +209,11 @@ export const openRecoveryStore = ({
      * An existing but invalid file is not replaced; it throws.
      */
     ensure: () => {
-      const made = replace((current) => current !== null);
+      const made = replace({ onlyIfMissing: true });
       return made ? { created: true, ...made } : { created: false };
     },
     /** Replace the token. Returns { token, createdAt }; print the token once. */
-    rotate: () => replace(() => false),
+    rotate: () => replace({ onlyIfMissing: false }),
     /** True when `token` is the current recovery token. Throws for an invalid file. */
     check: (token) => {
       if (typeof token !== 'string' || !RECOVERY_TOKEN_RE.test(token)) return false;
