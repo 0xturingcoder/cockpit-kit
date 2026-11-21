@@ -203,6 +203,8 @@ Captured content, page content, inbox entries, web clips, Slack text, comments, 
 
 The users and credentials store (`identity.json` in the per-repo state directory by default, or the `identity_store` path in `.cockpit/serve.toml`) holds passkey credentials. It lives outside `COCKPIT_ROOT` on purpose. Never copy it into the knowledge repo, commit it, print its contents, or change its permissions. Change it only through `skill/lib/identity/store.mjs`, and only when the operator asks.
 
+Passkey sign-in (`serve.mjs --passkeys`, see `docs/passkeys.md` in the kit) is for the operator's browser. Do not start the server with `--passkeys`, change `--rp-id` or `--origin`, or register or remove passkeys unless the operator asks. Never print, log, or share the tokenized "Add a passkey" URL except to the operator.
+
 ## Verification Checklist
 
 Before reporting success:

@@ -26,6 +26,7 @@ Work is tracked in GitHub Issues and grouped by phase milestones ("Phase N: Name
 - One issue per PR. Keep PRs small.
 - Docs travel with the change: a PR that changes behavior, config, commands, or this process updates the docs (and this file, if relevant) in the same PR. No follow-up docs PRs.
 - No secrets, real hostnames, real personal data, or machine-specific paths in code, tests, fixtures, docs, or commit messages. Use invented names and reserved example domains such as `example.com`. Generate secret-shaped test values at runtime.
+- Recorded WebAuthn fixtures (`test/fixtures/webauthn/*.json`) are the one kind of recorded test data. Record them against a reserved example or local relying party with an invented user, never from a live deployment; the fixture test rejects other host names. Tests that do not need real-browser data use synthetic credentials generated at runtime and say so in their names or comments.
 - The kit is generic and upstream-friendly. Do not add deployment-specific code.
 - **No runtime dependencies.** The kit uses only Node's standard library. Keep it that way unless a maintainer agrees otherwise, and record that decision on the issue before adding one.
 

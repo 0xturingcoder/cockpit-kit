@@ -11,7 +11,7 @@ It is an AI-agent local memory kit, not the Red Hat Cockpit Linux server adminis
 - Creates or links a starter Cockpit-compatible static HTML knowledge repo.
 - Lints pages against the Cockpit Kit page contract.
 - Generates a deterministic static search index.
-- Serves the local repo over a loopback-only HTTP server with token auth by default.
+- Serves the local repo over a loopback-only HTTP server with token auth by default, with optional passkey (WebAuthn) sign-in.
 - Optionally accepts operator page comments and captures through an opt-in write service.
 - Provides an advisory write lock so several agents can safely share one knowledge repo.
 
@@ -157,13 +157,28 @@ This is a lean first version of the [design](docs/design/operator-comments-and-c
 
 ## Users and credentials store
 
-Groundwork for passkey sign-in: `skill/lib/identity/store.mjs` keeps users (stable opaque id, display name, `owner` or `member` role) and their passkey credentials (credential id, COSE public key, signature counter, transports, created time, label) in one private JSON file per knowledge repo. Nothing uses it for sign-in yet.
+`skill/lib/identity/store.mjs` keeps users (stable opaque id, display name, `owner` or `member` role) and their passkey credentials (credential id, COSE public key, signature counter, transports, created time, label) in one private JSON file per knowledge repo. Passkey sign-in (below) reads and updates it.
 
 - **Where:** `${XDG_STATE_HOME:-~/.local/state}/cockpit-kit/<repo-hash>/identity.json` by default. Override it with `serve.mjs --identity-store <path>` or `identity_store = "<path>"` in `.cockpit/serve.toml`. The path must be absolute (or start with `~/`) and must resolve outside the served root, comparing real paths; otherwise `serve.mjs` refuses to start.
-- **Behavior change:** this check runs at every `serve.mjs` start, even though nothing uses identity yet, and it covers the default path. If the served root is at or above `$HOME` (or above `XDG_STATE_HOME`), `serve.mjs` now refuses to start. Serve a narrower root, or set `--identity-store` to a path outside the root.
+- **Behavior change:** this check runs at every `serve.mjs` start, with or without `--passkeys`, and it covers the default path. If the served root is at or above `$HOME` (or above `XDG_STATE_HOME`), `serve.mjs` now refuses to start. Serve a narrower root, or set `--identity-store` to a path outside the root.
 - **Safety:** writes are atomic (fsynced `0600` temp file, then rename), serialized by a short token lock, and capped at 1 MiB (`store_full`). Loading refuses symlinks and files with any group or world permission bit (`chmod 600`), and fails closed on anything invalid, including a store without exactly one `owner`. Error messages never include credential material.
 
 Schema, API, and error codes: [`docs/identity-store.md`](docs/identity-store.md).
+
+## Passkey sign-in (opt-in)
+
+`serve.mjs --passkeys` adds WebAuthn passkey registration and sign-in, with a small login page at `/auth/login/`. It is built on `node:crypto` with no dependencies and accepts a narrow subset: `none` attestation only, ES256 and RS256 only, user verification required, single-use two-minute challenges, and the signature counter rule.
+
+```bash
+node ~/.local/share/cockpit-kit/skill/scripts/serve.mjs --root /path/to/knowledge-repo --passkeys
+```
+
+- **First passkey:** open the printed "Add a passkey" URL (`http://localhost:<port>/auth/login/?token=...`), enter your name, and add a passkey. The first registration creates the owner in the identity store. Use `localhost`, not `127.0.0.1`, for passkeys.
+- **Sign in:** open `/auth/login/` and choose "Sign in with a passkey". For the owner this sets the same session cookie as the tokenized URL. Members verify but get no session until per-device sessions land.
+- **Config:** `--rp-id <domain>` (default `localhost`) and `--origin <origin>` (repeatable; default `http://localhost:<port>`), command line only. Each origin must be the rp id or a subdomain of it, over https except for `localhost`. `--passkeys` needs auth, and it refuses an `identity_store` set in `.cockpit/serve.toml`; use `--identity-store` or the default.
+- **Safety:** the relying-party id and origins never come from request headers. Sign-in failures all return the same `401 sign_in_failed`, and failed attempts are rate limited. The login page has no inline script and is served with a strict Content-Security-Policy.
+
+Ceremonies, the supported subset, error codes, and the verifier API: [`docs/passkeys.md`](docs/passkeys.md).
 
 ## Themes: Light, Dark, System
 
@@ -207,6 +222,7 @@ The GitHub Actions workflow runs `node --test` on Ubuntu and macOS with Node 20 
 
 - Page contract: [`skill/reference/page-contract.md`](skill/reference/page-contract.md)
 - Users and credentials store (schema and API): [`docs/identity-store.md`](docs/identity-store.md)
+- Passkey sign-in (ceremonies, supported subset, config, errors, verifier API): [`docs/passkeys.md`](docs/passkeys.md)
 - Design (lean MVP implemented, hardening deferred): [Operator comments and capture lifecycle](docs/design/operator-comments-and-capture.md) ([#10](https://github.com/autojeremy/cockpit-kit/issues/10)).
 
 ## Security
