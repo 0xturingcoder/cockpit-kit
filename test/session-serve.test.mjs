@@ -58,15 +58,26 @@ test('serve sessions: the cookie is HttpOnly, SameSite=Strict, Path=/, with Max-
   });
 });
 
-test('serve sessions: on an https origin the cookie is Secure', async () => {
+test('serve sessions: when every passkey origin is https the cookie is __Host-cockpit_session, Secure, and the only name read', async () => {
   const layout = makeServeRoot();
   const origin = 'https://cockpit.example.com';
   await withServe(serveConfig(layout, ['--rp-id', 'example.com', '--origin', origin]), async (ctx) => {
     const https = { ...ctx, origin };
     const key = makeCredential();
     const owner = await registerOwner(https, key, { rpId: 'example.com' });
-    const { res } = await signIn(https, key, owner.user_id, { rpId: 'example.com' });
-    assert.match(res.headers['set-cookie'][0], /; HttpOnly; SameSite=Strict; Path=\/; Max-Age=7776000; Secure$/);
+    const { res, cookie } = await signIn(https, key, owner.user_id, { rpId: 'example.com' });
+    assert.match(res.headers['set-cookie'][0], /^__Host-cockpit_session=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=7776000; Secure$/);
+    assert.doesNotMatch(res.headers['set-cookie'][0], /Domain=/i);
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie })).status, 200);
+    // The same token under the plain name (as a cookie planted over http would be) is ignored.
+    const plain = cookie.replace(/^__Host-cockpit_session=/, 'cockpit_session=');
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie: plain })).status, 401);
+    const csrf = (await account(ctx, cookie)).json.csrf_token;
+    const out = await post(https, '/auth/account/sign-out', { cookie, csrf });
+    assert.equal(out.status, 200, out.text);
+    for (const name of ['cockpit_session', '__Host-cockpit_session', 'cockpit_serve']) {
+      assert.ok(out.headers['set-cookie'].includes(`${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure`), name);
+    }
   });
 });
 
@@ -89,7 +100,8 @@ test('serve sessions: each sign-in is its own session; a user lists them and rev
     const current = view.json.sessions.find((s) => s.current);
     assert.equal(current.id, view.json.session_id);
     for (const s of view.json.sessions) {
-      assert.deepEqual(Object.keys(s).sort(), ['created_at', 'credential_id', 'current', 'expires_at', 'id', 'label', 'last_seen_at', 'user_id']);
+      assert.deepEqual(Object.keys(s).sort(), ['created_at', 'credential_id', 'current', 'expires_at', 'id', 'kind', 'label', 'last_seen_at', 'step_up_at', 'user_id']);
+      assert.equal(s.kind, 'passkey');
     }
     assert.equal(view.headers['cache-control'], 'no-store');
     assert.match(view.headers['content-security-policy'], /default-src 'none'/);

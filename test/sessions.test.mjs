@@ -40,7 +40,9 @@ test('sessions: create returns a random token, stores only its hash, and records
   const { token, session, maxAgeSeconds } = sessions.create({ userId: OWNER, credentialId: 'q83vEjRWeJA', label: 'Work laptop' });
   assert.match(token, /^[A-Za-z0-9_-]{43}$/);
   assert.equal(maxAgeSeconds, DEFAULT_SESSION_LIFETIME_MS / 1000);
-  assert.deepEqual(Object.keys(session).sort(), ['created_at', 'credential_id', 'expires_at', 'id', 'label', 'last_seen_at', 'user_id']);
+  assert.deepEqual(Object.keys(session).sort(), ['created_at', 'credential_id', 'expires_at', 'id', 'kind', 'label', 'last_seen_at', 'step_up_at', 'user_id']);
+  assert.equal(session.kind, 'passkey');
+  assert.equal(session.step_up_at, session.created_at, 'a passkey sign-in counts as a step-up');
   assert.equal(session.user_id, OWNER);
   assert.equal(session.label, 'Work laptop');
   assert.equal(session.created_at, '2026-03-04T05:06:07.000Z');
@@ -203,8 +205,16 @@ test('sessions: the file is validated and fails closed', posixOnly, () => {
   };
   write({ ...doc, extra: 1 });
   assertCode(() => sessions.validate(token), 'invalid_store');
-  write({ ...doc, schema_version: 2 });
+  write({ ...doc, schema_version: 3 });
   assertCode(() => sessions.validate(token), 'unsupported_schema');
+  write({ ...doc, schema_version: 1 });
+  assertCode(() => sessions.validate(token), 'invalid_store');
+  write({ ...doc, sessions: [{ ...doc.sessions[0], kind: 'token' }] });
+  assertCode(() => sessions.validate(token), 'invalid_store');
+  write({ ...doc, sessions: [{ ...doc.sessions[0], kind: 'recovery', credential_id: 'q83vEjRWeJA' }] });
+  assertCode(() => sessions.validate(token), 'invalid_store');
+  write({ ...doc, sessions: [{ ...doc.sessions[0], step_up_at: 'yesterday' }] });
+  assertCode(() => sessions.validate(token), 'invalid_store');
   write({ ...doc, sessions: [doc.sessions[0], doc.sessions[0]] });
   assertCode(() => sessions.validate(token), 'duplicate_id');
   write('{not json');
@@ -252,4 +262,52 @@ test('sessions: tokens have 256 bits of randomness and do not repeat', () => {
   const tokens = new Set(Array.from({ length: 20 }, () => sessions.create({ userId: crypto.randomBytes(9).toString('base64url') }).token));
   assert.equal(tokens.size, 20);
   for (const token of tokens) assert.equal(Buffer.from(token, 'base64url').length, 32);
+});
+
+test('sessions: version 1 files load as passkey sessions without a step-up and are written back as version 2', () => {
+  const { root, file } = layout();
+  const c = clock();
+  const sessions = openSessionStore({ file, root, now: c.now });
+  const { token } = sessions.create({ userId: OWNER, credentialId: 'q83vEjRWeJA', label: 'Work laptop' });
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const v1 = { schema_version: 1, sessions: doc.sessions.map(({ kind: _kind, step_up_at: _stepUp, ...rest }) => rest) };
+  fs.writeFileSync(`${file}.new`, JSON.stringify(v1), { mode: 0o600 });
+  fs.renameSync(`${file}.new`, file);
+  const loaded = sessions.validate(token);
+  assert.equal(loaded.kind, 'passkey');
+  assert.equal(loaded.step_up_at, null, 'an upgraded session has to step up before adding a passkey');
+  sessions.create({ userId: MEMBER });
+  const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(written.schema_version, 2);
+  assert.deepEqual(written.sessions.map((s) => [s.kind, s.step_up_at === null]), [['passkey', true], ['passkey', false]]);
+});
+
+test('sessions: recovery sessions have no passkey, start without a step-up, can be shorter, and are revoked by kind', () => {
+  const { root, file } = layout();
+  const c = clock();
+  const sessions = openSessionStore({ file, root, now: c.now });
+  const recovery = sessions.create({ userId: OWNER, kind: 'recovery', label: 'Recovery (server token)', maxLifetimeMs: 12 * 60 * 60 * 1000 });
+  assert.equal(recovery.session.kind, 'recovery');
+  assert.equal(recovery.session.credential_id, null);
+  assert.equal(recovery.session.step_up_at, null);
+  assert.equal(recovery.maxAgeSeconds, 12 * 60 * 60);
+  assert.equal(Date.parse(recovery.session.expires_at) - Date.parse(recovery.session.created_at), 12 * 60 * 60 * 1000);
+  // maxLifetimeMs only shortens.
+  const short = openSessionStore({ file, root, now: c.now, lifetimeMs: 60 * 60 * 1000 });
+  assert.equal(short.create({ userId: OWNER, kind: 'recovery', maxLifetimeMs: 12 * 60 * 60 * 1000 }).maxAgeSeconds, 3600);
+  assertCode(() => sessions.create({ userId: OWNER, kind: 'recovery', credentialId: 'q83vEjRWeJA' }), 'invalid_argument');
+  assertCode(() => sessions.create({ userId: OWNER, kind: 'token' }), 'invalid_argument');
+
+  c.at += 60 * 1000;
+  const stepped = sessions.markStepUp(recovery.session.id);
+  assert.equal(stepped.step_up_at, new Date(c.at).toISOString());
+  assert.equal(sessions.validate(recovery.token).step_up_at, stepped.step_up_at);
+  assert.equal(sessions.markStepUp('ses_AAAAAAAAAAAAAAAAAAAAAA'), null);
+
+  const passkey = sessions.create({ userId: OWNER, credentialId: 'q83vEjRWeJA' });
+  const revoked = sessions.revokeKind('recovery');
+  assert.equal(revoked.length, 2);
+  assert.ok(revoked.every((s) => s.kind === 'recovery'));
+  assert.equal(sessions.validate(recovery.token), null);
+  assert.ok(sessions.validate(passkey.token));
 });

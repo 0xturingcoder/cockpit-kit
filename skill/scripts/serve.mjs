@@ -17,10 +17,11 @@ import { HttpError, createPasskeyApi } from '../lib/identity/passkey-http.mjs';
 import { SessionStoreError, openSessionStore } from '../lib/identity/sessions.mjs';
 import { openInviteStore } from '../lib/identity/invites.mjs';
 import {
-  INVITE_PATH, SESSION_COOKIE, createAccountApi, createSessionAuth, deviceLabel, expiredCookie, parseCookies, sessionCookie,
+  HOST_SESSION_COOKIE, INVITE_PATH, SESSION_COOKIE, createAccountApi, createSessionAuth, deviceLabel, expiredCookie, parseCookies, sessionCookie,
+  sessionCookieName,
 } from '../lib/identity/session-http.mjs';
 
-const cookieName = 'cockpit_serve';
+const tokenCookieName = 'cockpit_serve';
 const allowedCockpitPath = '.cockpit/search-index.json';
 const loginPath = '/auth/login/';
 const settingsPath = '/auth/settings/';
@@ -172,7 +173,7 @@ function resolveServedFile(root, rawUrl) {
 }
 
 function requestHasAuth(req, token) {
-  return timingSafeEqual(parseCookies(req.headers.cookie).get(cookieName) ?? '', token);
+  return timingSafeEqual(parseCookies(req.headers.cookie).get(tokenCookieName) ?? '', token);
 }
 
 function requestToken(req) {
@@ -217,7 +218,7 @@ function serveKitAsset(req, res, pathname) {
 // session: it lasts for the browser session and works until the server
 // restarts with a new token.
 function tokenCookie(token, secure) {
-  return `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/${secure ? '; Secure' : ''}`;
+  return `${tokenCookieName}=${token}; HttpOnly; SameSite=Strict; Path=/${secure ? '; Secure' : ''}`;
 }
 
 // Secure when every configured origin is https, so the cookie is never sent
@@ -291,8 +292,11 @@ function createIdentity(server, config, { token, csrfSecret, log, now }) {
   const invites = openInviteStore({
     file: config.inviteStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS, now, ...(config.inviteLifetimeMs ? { lifetimeMs: config.inviteLifetimeMs } : {}),
   });
-  const sessionAuth = createSessionAuth({ sessions, identityStore: store, log });
   const origins = () => passkeyOrigins(server, config);
+  // __Host-cockpit_session when every passkey origin is https. Only that
+  // name is read, so a plain-named cookie planted over http is ignored.
+  const cookieName = sessionCookieName(origins());
+  const sessionAuth = createSessionAuth({ sessions, identityStore: store, cookieName, log });
   const ceremonies = createPasskeyCeremonies({ store, rpId: config.rpId, origins, invites });
   const passkeys = createPasskeyApi({
     ceremonies,
@@ -312,7 +316,7 @@ function createIdentity(server, config, { token, csrfSecret, log, now }) {
         log(`session create failed (${error?.code ?? error?.name})`);
         throw storeUnavailable(error);
       }
-      return { 'Set-Cookie': sessionCookie(created.token, { maxAgeSeconds: created.maxAgeSeconds, secure: origin.startsWith('https:') }) };
+      return { 'Set-Cookie': sessionCookie(created.token, { maxAgeSeconds: created.maxAgeSeconds, secure: origin.startsWith('https:'), name: cookieName }) };
     },
     log,
   });
@@ -322,7 +326,10 @@ function createIdentity(server, config, { token, csrfSecret, log, now }) {
     identityStore: store,
     allowedOrigins: origins,
     csrfToken: (principal, sessionId) => csrfTokenFor(csrfSecret, principal, sessionId),
-    signOutCookies: (secure) => [expiredCookie(SESSION_COOKIE, { secure }), expiredCookie(cookieName, { secure })],
+    // Sign-out expires both session cookie names and any old server-token cookie.
+    signOutCookies: (secure) => [
+      expiredCookie(SESSION_COOKIE, { secure }), ...(secure ? [expiredCookie(HOST_SESSION_COOKIE, { secure })] : []), expiredCookie(tokenCookieName, { secure }),
+    ],
     invites,
     log,
   });
