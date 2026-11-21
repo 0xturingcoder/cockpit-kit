@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openIdentityStore } from '../skill/lib/identity/store.mjs';
+import { findCredential, openIdentityStore } from '../skill/lib/identity/store.mjs';
 import { openSessionStore } from '../skill/lib/identity/sessions.mjs';
 import { IntentStore } from '../skill/lib/intents/store.mjs';
 import { deviceLabel } from '../skill/lib/identity/session-http.mjs';
@@ -232,6 +232,72 @@ test('serve sessions: removing the passkey a session signed in with ends that se
     assert.equal((await call({ port: ctx.port, pathname: '/', cookie: viaFirst.cookie })).status, 401);
     assert.equal((await call({ port: ctx.port, pathname: '/', cookie: viaSpare.cookie })).status, 200);
     assert.equal(store.load().users[0].credentials[0].id, spare.id);
+  });
+});
+
+test('serve sessions: a passkey removal that cannot revoke its sessions keeps the passkey, and a retry succeeds', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const { store, ownerKey, ownerId, member, memberKey, memberCredentialId } = await setup(ctx, layout);
+    const owner = await signIn(ctx, ownerKey, ownerId);
+    const csrf = (await account(ctx, owner.cookie)).json.csrf_token;
+    const memberSession = await signIn(ctx, memberKey, member.id);
+    const remove = () => post(ctx, '/auth/account/passkeys/remove', { cookie: owner.cookie, csrf, body: { credential_id: memberCredentialId } });
+    const lockFile = holdLock(layout.sessionStore);
+    try {
+      const busy = await remove();
+      assert.equal(busy.status, 503, busy.text);
+      assert.equal(busy.json.error.code, 'store_busy');
+    } finally {
+      fs.rmSync(lockFile, { force: true });
+    }
+    assert.ok(findCredential(store.load(), memberCredentialId), 'the passkey is still present');
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie: memberSession.cookie })).status, 200);
+    const retry = await remove();
+    assert.equal(retry.status, 200, retry.text);
+    assert.deepEqual(retry.json, { removed: true, sessions_revoked: 1, current: false });
+    assert.equal(findCredential(store.load(), memberCredentialId), null);
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie: memberSession.cookie })).status, 401);
+  });
+});
+
+test('serve sessions: a passkey removal that fails after revoking keeps the passkey, and a retry succeeds', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const { store, ownerKey, ownerId, member, memberKey, memberCredentialId } = await setup(ctx, layout);
+    const owner = await signIn(ctx, ownerKey, ownerId);
+    const csrf = (await account(ctx, owner.cookie)).json.csrf_token;
+    const memberSession = await signIn(ctx, memberKey, member.id);
+    const remove = () => post(ctx, '/auth/account/passkeys/remove', { cookie: owner.cookie, csrf, body: { credential_id: memberCredentialId } });
+    const lockFile = holdLock(layout.identityStore);
+    try {
+      const busy = await remove();
+      assert.equal(busy.status, 503, busy.text);
+      assert.equal(busy.json.error.code, 'store_busy');
+    } finally {
+      fs.rmSync(lockFile, { force: true });
+    }
+    assert.ok(findCredential(store.load(), memberCredentialId), 'the passkey is still present');
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie: memberSession.cookie })).status, 401, 'its sessions already ended');
+    const retry = await remove();
+    assert.equal(retry.status, 200, retry.text);
+    assert.deepEqual(retry.json, { removed: true, sessions_revoked: 0, current: false });
+    assert.equal(findCredential(store.load(), memberCredentialId), null);
+  });
+});
+
+test('serve sessions: a refused removal of the owner\'s last passkey leaves its sessions alive', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const { ownerKey, ownerId, ownerCredentialId } = await setup(ctx, layout);
+    const first = await signIn(ctx, ownerKey, ownerId);
+    const second = await signIn(ctx, ownerKey, ownerId);
+    const csrf = (await account(ctx, first.cookie)).json.csrf_token;
+    const last = await post(ctx, '/auth/account/passkeys/remove', { cookie: first.cookie, csrf, body: { credential_id: ownerCredentialId } });
+    assert.equal(last.status, 409);
+    assert.equal(last.json.error.code, 'last_passkey');
+    assert.equal((await account(ctx, first.cookie)).json.sessions.length, 2);
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie: second.cookie })).status, 200);
   });
 });
 

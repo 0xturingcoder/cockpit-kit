@@ -258,10 +258,13 @@ export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins
         requireOwner({ user });
         if (typeof body.credential_id !== 'string' || !CREDENTIAL_ID_RE.test(body.credential_id)) throw new HttpError(400, 'invalid_request', 'Expected credential_id.');
         const data = auth.identity();
-        if (!data || !findCredential(data, body.credential_id)) throw new HttpError(404, 'passkey_not_found', 'No such passkey.');
-        identityStore.removeCredential(body.credential_id);
-        // Sessions signed in with a removed passkey end with it.
+        const found = data && findCredential(data, body.credential_id);
+        if (!found) throw STORE_ERRORS.not_found();
+        if (found.user.role === 'owner' && found.user.credentials.length === 1) throw STORE_ERRORS.last_credential();
+        // End the passkey's sessions first, so a failed removal leaves the
+        // passkey in place to retry rather than sessions outliving it.
         const revoked = sessions.revokeCredential(body.credential_id);
+        identityStore.removeCredential(body.credential_id);
         const current = revoked.some((item) => item.id === session.id);
         return { status: 200, body: { removed: true, sessions_revoked: revoked.length, current }, headers: current ? signOutHeaders(origin) : {} };
       }),
