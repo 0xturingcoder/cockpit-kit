@@ -441,6 +441,28 @@ test('serve sessions: intents routes accept an owner passkey session with a sess
   });
 });
 
+test('serve sessions: a member session wins over the server-token cookie on intents routes', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout, ['--write']), async (ctx) => {
+    const { member, memberKey } = await setup(ctx, layout);
+    const tokenCookie = `cockpit_serve=${ctx.token}`;
+    const tokenCsrf = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: tokenCookie })).json.csrf_token;
+    const memberSession = await signIn(ctx, memberKey, member.id);
+    const both = `${memberSession.cookie}; ${tokenCookie}`;
+    for (const pathname of ['/api/cockpit/v1/capabilities', '/api/cockpit/v1/intents']) {
+      const res = await call({ port: ctx.port, pathname, cookie: both });
+      assert.equal(res.status, 403, `${pathname}: ${res.text}`);
+      assert.equal(res.json.error.code, 'forbidden');
+    }
+    const created = await call({
+      port: ctx.port, method: 'POST', pathname: '/api/cockpit/v1/intents', cookie: both, origin: ctx.origin,
+      body: { schema_version: 1, request_id: '00000000-0000-4000-8000-0000000000bb', mode: 'capture', operator_message: 'Note', target: null }, headers: { 'X-Cockpit-CSRF': tokenCsrf },
+    });
+    assert.equal(created.status, 403, created.text);
+    assert.equal(created.json.error.code, 'forbidden');
+  });
+});
+
 test('serve sessions: intents state records the owner user id as the principal', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout, ['--write']), async (ctx) => {
