@@ -24,17 +24,17 @@ The sessions file is always `sessions.json` next to the identity store (by defau
 
 ## What a session grants
 
-Sessions authenticate the user by id. `serve.mjs` checks the cookie on every request: the token's hash must match a stored session that has not expired, and the session's user must still exist in the identity store and not be disabled. If any check fails, the request is treated as unauthenticated. A corrupt or unreadable sessions file fails closed the same way (the reason is logged to stderr as a code).
+Sessions authenticate the user by id. `serve.mjs` checks the cookie on every request: the token's hash must match a stored session that has not expired, the session's user must still exist in the identity store and not be disabled, and the passkey the session signed in with must still be on that user. If any check fails, the request is treated as unauthenticated. A corrupt or unreadable sessions file fails closed the same way (the reason is logged to stderr as a code).
 
 | Surface | Owner session | Member session | Server-token cookie |
 | --- | --- | --- | --- |
 | Knowledge-repo pages (`GET`/`HEAD`) | yes | yes | yes |
 | `/auth/account` (own sessions, sign out) | yes | yes | no (`401 session_required`); sign-out still clears cookies |
 | `/auth/account/users`, `/auth/account/passkeys/remove` | yes | no (`403 forbidden`) | no |
-| Passkey registration (`/auth/passkey/register/*`) | no | no | yes (unchanged; see [Not in this change](#not-in-this-change)) |
+| Passkey registration (`/auth/passkey/register/*`) | no | no | yes, even alongside a session cookie (unchanged; see [Not in this change](#not-in-this-change)) |
 | Intents API with `serve --write` (see below) | yes | no (`403 forbidden`) | yes |
 
-If a request carries both a live session cookie and the server-token cookie, the session is used.
+If a request carries both a live session cookie and the server-token cookie, the session is used on the account API and the intents API, so a member session plus the server-token cookie gets `403 forbidden` on the intents routes. Passkey registration is the exception: it looks only at the server-token cookie, so a browser holding a member session and the server-token cookie can still add a passkey for the owner. Aligning registration with the session-first rule is tracked in #11.
 
 ### Intents routes
 
@@ -63,7 +63,7 @@ Every request: no query string (`400 invalid_request`). `GET` requests with `Sec
 | `POST /auth/account/sign-out` `{}` | anyone | Revokes the current session (CSRF required when there is one) and clears both `cockpit_session` and `cockpit_serve` with `Max-Age=0`. Without a session it only clears the cookies. |
 | `POST /auth/account/sessions/revoke` `{ session_id }` | any session | Revokes one session. Members can revoke only their own; another user's session returns `404 session_not_found`, exactly like a missing one. Returns `{ revoked: true, current }`, and clears the cookies when `current` is true. |
 | `GET /auth/account/users` | owner | `{ users: [{ id, display_name, role, disabled, created_at, passkeys: [{ id, label, created_at, transports }], sessions: [...] }] }`. No public keys, counters, or token hashes. |
-| `POST /auth/account/passkeys/remove` `{ credential_id }` | owner | Removes any user's passkey and revokes every session that signed in with it. Returns `{ removed: true, sessions_revoked, current }`. The owner's last passkey is refused with `409 last_passkey`. |
+| `POST /auth/account/passkeys/remove` `{ credential_id }` | owner | Revokes every session that signed in with the passkey, then removes the passkey (any user's). Returns `{ removed: true, sessions_revoked, current }`. A malformed id, an unknown passkey, and the owner's last passkey (`409 last_passkey`) are refused before anything changes, so a refused request ends no sessions. If the removal then fails (for example `503 store_busy`), the passkey is still there and the request can be retried. |
 
 Each session in a response is `{ id, user_id, credential_id, label, created_at, last_seen_at, expires_at, current }`.
 
@@ -137,12 +137,12 @@ sessions.revokeCredential(credentialId);
 ## Users, passkeys, and recovery
 
 - **Owner's last passkey:** `removeCredential` in the identity store refuses it (`last_credential`), and the account API returns `409 last_passkey`. Add another passkey first. A member's last passkey can be removed.
-- **Removing a passkey** ends every session that signed in with it.
+- **Removing a passkey** ends every session that signed in with it. The account API revokes those sessions before it removes the passkey, and a session whose passkey is no longer on its user is refused on the next request in any case, so a passkey removed some other way (such as `removeCredential` in the identity store) also ends its sessions. Sessions created without a passkey are unaffected.
 - **Disabled users:** their sessions are refused on the next request. The owner cannot be disabled (unchanged).
 
 ## Not in this change
 
-- **The server token is not a session yet.** The tokenized URL still sets the `cockpit_serve` cookie, which is not listed or revocable and lasts for the browser session until the server restarts with a new token. It still authorizes passkey registration, and it is accepted on the intents API with the principal `operator`. Revoking sessions does not sign out a browser that also holds this cookie; **Sign out** on that browser clears it. Making token sign-in an owner-only recovery session that cannot add passkeys without a fresh passkey step-up, its rate limits and audit log, and token rotation are #11.
+- **The server token is not a session yet.** The tokenized URL still sets the `cockpit_serve` cookie, which is not listed or revocable and lasts for the browser session until the server restarts with a new token. It still authorizes passkey registration, and it is accepted on the intents API with the principal `operator`. Revoking sessions does not sign out a browser that also holds this cookie; **Sign out** on that browser clears it. A browser holding only this cookie cannot use the account API (`401 session_required`), so during recovery it cannot list or revoke sessions; that is tracked in #11, along with registration accepting this cookie alongside a member session (see [What a session grants](#what-a-session-grants)). Making token sign-in an owner-only recovery session that cannot add passkeys without a fresh passkey step-up, its rate limits and audit log, and token rotation are #11.
 - **User administration:** there is no `enableUser`, user removal, or ownership transfer, and the disabled-user rules in the identity store are unchanged. These are left for #11 (recovery) and #10 (invites).
 - **Members on the intents API:** refused until verified comment authors and the allowlist (#12).
 - **Per-client rate limits** (#21) and **async store writes** (#20).
@@ -150,4 +150,4 @@ sessions.revokeCredential(credentialId);
 ## Tests
 
 - `test/sessions.test.mjs`: the store, including hashing, expiry, revocation seen across processes, concurrent sessions, two processes creating sessions at once, throttled and non-blocking last-seen writes, the per-user limit, and fail-closed loading.
-- `test/session-serve.test.mjs`: `serve.mjs` end to end: cookie attributes (`Max-Age`, `Secure` on https), concurrent sessions, revoking another or the current session, sign-out, expiry, no writes per request, member and owner authorization boundaries, passkey removal ending sessions, disabled users, request checks, the settings page headers, the intents routes with session-bound CSRF, and `--session-lifetime` parsing.
+- `test/session-serve.test.mjs`: `serve.mjs` end to end: cookie attributes (`Max-Age`, `Secure` on https), concurrent sessions, revoking another or the current session, sign-out, expiry, no writes per request, member and owner authorization boundaries, passkey removal ending sessions (including when a store write fails, a refused removal, and a passkey removed directly in the store), disabled users, request checks, the settings page headers, the intents routes with session-bound CSRF, a member session winning over the server-token cookie on the intents routes, and `--session-lifetime` parsing.
