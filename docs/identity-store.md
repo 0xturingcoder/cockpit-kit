@@ -115,7 +115,7 @@ const hit = findCredential(data, credential.id); // { user, credential } or null
 | `store.createUserWithCredential({ displayName, role = 'member', id?, credential })` | `createUser` and `addCredential` in one locked write, returning `{ user, credential }`. If either step fails (for example a bad label, a duplicate credential id, or `store_busy`), nothing is written, so a user is never left without the credential. The first owner can be created this way. |
 | `store.addCredential(userId, { id, publicKey, counter = 0, transports = [], label = '' })` | Registers a credential for an enabled user. The credential id must not exist for any user. |
 | `store.updateCounter(credentialId, counter)` | Stores a newer signature counter. The counter only moves forward: a value less than or equal to the stored one throws `counter_regression`, which the caller should treat as a possibly cloned authenticator. `0` to `0` is accepted without writing, because authenticators without a counter always report 0. Refused for disabled users. |
-| `store.removeCredential(credentialId)` | Removes the credential and returns it. Allowed for disabled users. |
+| `store.removeCredential(credentialId)` | Removes the credential and returns it. Allowed for disabled users. The owner's last passkey is refused with `last_credential`, so the owner is never left with only the recovery token; add another passkey first. A member's last passkey can be removed. |
 | `store.disableUser(userId)` | Disables a member. Calling it again does nothing. The owner cannot be disabled; ownership transfer is out of scope for this phase. |
 | `findUser(data, userId)` / `findCredential(data, credentialId)` | Pure lookups over a loaded document. They return `null` when nothing matches. |
 | `validateIdentityData(data)` | Validates a whole document (used by `load()` and before every write). |
@@ -139,6 +139,7 @@ Failures throw `IdentityStoreError` with a stable `code`:
 | `not_found` | No user or credential with that id. |
 | `user_disabled` | Adding a credential to, or updating a counter for, a disabled user. |
 | `counter_regression` | The signature counter did not increase. |
+| `last_credential` | An attempt to remove the owner's only passkey. |
 | `unsafe_path` / `unsafe_file` / `unsafe_permissions` | The path is inside the root or its directory is a symlink; the file is a symlink or not a regular file; or the file has the wrong owner or mode, or its directory is writable by group or others. |
 | `store_busy` | Another writer held the lock for longer than `lockWaitMs` (5 seconds by default), or this writer's lock was taken over before it wrote (nothing was written). |
 | `invalid_argument` | A bad argument to an API call, such as a malformed base64url credential id or public key, a counter out of range, or a display name or label that breaks the field rules. This is bad caller (client) input, not a corrupt store. |

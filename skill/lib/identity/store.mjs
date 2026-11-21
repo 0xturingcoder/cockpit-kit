@@ -292,9 +292,12 @@ const applyUpdateCounter = (data, credentialId, counter) => {
   return { data: replaceUser(data, userIndex, next), result: updated };
 };
 
+// The owner's last passkey is never removed: without it, only the recovery
+// token could sign the owner in. Add another passkey first.
 const applyRemoveCredential = (data, credentialId) => {
   const { userIndex, credentialIndex } = credentialPosition(data, credentialId);
   const user = data.users[userIndex];
+  if (user.role === 'owner' && user.credentials.length === 1) fail("The owner's last passkey cannot be removed; add another passkey first", 'last_credential');
   const removed = user.credentials[credentialIndex];
   const next = { ...user, credentials: user.credentials.filter((_, index) => index !== credentialIndex) };
   return { data: replaceUser(data, userIndex, next), result: removed };
@@ -482,6 +485,7 @@ export const openIdentityStore = ({
  *   Register a credential for an enabled user.
  * @property {(credentialId: string, counter: number) => IdentityCredential} updateCounter
  *   Record a newer signature counter; throws code "counter_regression" if it does not increase (0 -> 0 is allowed).
- * @property {(credentialId: string) => IdentityCredential} removeCredential Remove a credential and return it.
+ * @property {(credentialId: string) => IdentityCredential} removeCredential
+ *   Remove a credential and return it; throws code "last_credential" for the owner's only passkey.
  * @property {(userId: string) => IdentityUser} disableUser Disable a member (the owner cannot be disabled).
  */

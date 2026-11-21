@@ -274,11 +274,25 @@ test('updateCounter only moves forward and never echoes credential ids', () => {
 test('removeCredential deletes one credential by id', () => {
   const { store, owner, member } = seeded();
   const first = store.addCredential(owner.id, credential());
+  store.addCredential(owner.id, credential());
   const second = store.addCredential(member.id, credential());
   assert.equal(store.removeCredential(first.id).id, first.id);
   assert.equal(findCredential(store.load(), first.id), null);
   assert.equal(findCredential(store.load(), second.id).user.id, member.id);
   assertRejects(() => store.removeCredential(first.id), 'not_found', [first.id]);
+});
+
+test("removeCredential refuses the owner's last passkey but allows a member's last one", () => {
+  const { store, owner, member } = seeded();
+  const ownerKey = store.addCredential(owner.id, credential());
+  const memberKey = store.addCredential(member.id, credential());
+  const before = store.load();
+  assertRejects(() => store.removeCredential(ownerKey.id), 'last_credential', [ownerKey.id]);
+  assert.deepEqual(store.load(), before);
+  assert.equal(store.removeCredential(memberKey.id).id, memberKey.id);
+  const spare = store.addCredential(owner.id, credential());
+  assert.equal(store.removeCredential(ownerKey.id).id, ownerKey.id);
+  assertRejects(() => store.removeCredential(spare.id), 'last_credential');
 });
 
 test('disableUser disables members, keeps the owner, and blocks credential changes', () => {
