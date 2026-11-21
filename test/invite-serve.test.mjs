@@ -6,6 +6,7 @@
 // challenge capacity, and --invite-lifetime parsing. Users are invented.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -15,7 +16,7 @@ import { openInviteStore } from '../skill/lib/identity/invites.mjs';
 import { createPasskeyApi } from '../skill/lib/identity/passkey-http.mjs';
 import { createPasskeyCeremonies } from '../skill/lib/identity/passkeys.mjs';
 import { hashToken } from '../skill/lib/identity/sessions.mjs';
-import { findUser, openIdentityStore } from '../skill/lib/identity/store.mjs';
+import { MAX_FILE_BYTES, findUser, openIdentityStore } from '../skill/lib/identity/store.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
 import { makeCredential, registrationResponse } from './support/webauthn-synthetic.mjs';
 import { call, makeServeRoot, registerOwner, serveConfig, signIn, withServe } from './support/serve-harness.mjs';
@@ -65,6 +66,7 @@ const assertInvalid = (res, what) => {
 };
 
 const identity = (layout) => openIdentityStore({ file: layout.identityStore, root: layout.root });
+const inviteStore = (layout) => openInviteStore({ file: path.join(layout.base, 'state', 'invites.json'), root: layout.root });
 const members = (layout) => identity(layout).load().users.filter((user) => user.role === 'member');
 
 test('invites: the owner creates an invite; the link carries a random token in the fragment that is stored only hashed', async () => {
@@ -401,6 +403,141 @@ test('invites: a busy identity store returns 503 and keeps the invite for a retr
   });
 });
 
+test('invites: the owner can revoke an invite an enrollment has claimed, and the claim cannot bring it back', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const owner = await ownerSession(ctx);
+    const { token, invite } = await createInvite(ctx, owner);
+    const store = inviteStore(layout);
+    assert.deepEqual(store.spend(token, invite.id), invite);
+    assert.deepEqual((await call({ port: ctx.port, pathname: '/auth/account/invites', cookie: owner.cookie })).json.invites, [], 'a claimed invite is not listed');
+    assertInvalid(await inviteOptions(ctx, { token }), 'a claimed invite looks unknown');
+    const done = await post(ctx, '/auth/account/invites/revoke', { cookie: owner.cookie, csrf: owner.csrf, body: { invite_id: invite.id } });
+    assert.equal(done.status, 200, done.text);
+    assert.deepEqual(done.json, { revoked: true });
+    assert.equal(store.restore(token, invite.id), false);
+    assertInvalid(await inviteOptions(ctx, { token }), 'revoked');
+  });
+});
+
+// The server blocks on the identity lock for a second; another process
+// revokes the invite during that wait, while the enrollment holds its claim.
+test('invites: a revoke from another process during a failed enrollment wins, and the revoked link stays invalid', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const owner = await ownerSession(ctx);
+    const { token, invite } = await createInvite(ctx, owner);
+    const store = inviteStore(layout);
+    // A second challenge for the same invite, to try the link again after the revoke.
+    const spare = await inviteOptions(ctx, { token });
+    assert.equal(spare.status, 200, spare.text);
+
+    const url = new URL('../skill/lib/identity/invites.mjs', import.meta.url).href;
+    const script = `
+      import fs from 'node:fs';
+      import { openInviteStore } from ${JSON.stringify(url)};
+      const [file, root, inviteId] = process.argv.slice(1);
+      const pause = new Int32Array(new SharedArrayBuffer(4));
+      process.stdout.write('ready;');
+      const deadline = Date.now() + 20000;
+      const claimed = () => {
+        try {
+          return JSON.parse(fs.readFileSync(file, 'utf8')).invites.some((i) => i.id === inviteId && i.claimed_at);
+        } catch {
+          return false;
+        }
+      };
+      while (!claimed()) {
+        if (Date.now() > deadline) process.exit(2);
+        Atomics.wait(pause, 0, 0, 5);
+      }
+      process.stdout.write(JSON.stringify(openInviteStore({ file, root }).revoke(inviteId)));`;
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, store.file, layout.root, invite.id], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const exited = new Promise((resolve) => child.on('exit', resolve));
+    await new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('exit', (code) => reject(new Error(`revoker exited ${code} before it was ready: ${stderr}`)));
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+        if (stdout.startsWith('ready;')) resolve();
+      });
+    });
+
+    const lockFile = `${layout.identityStore}.lock`;
+    fs.writeFileSync(lockFile, 'another-writer', { mode: 0o600 });
+    let busy;
+    try {
+      busy = await enroll(ctx, token);
+    } finally {
+      fs.rmSync(lockFile, { force: true });
+    }
+    const code = await exited;
+    assert.equal(code, 0, `revoker exited ${code}: ${stderr}`);
+    assert.equal(busy.verify.status, 503, busy.verify.text);
+    assert.equal(busy.verify.json.error.code, 'store_busy');
+    assert.deepEqual(JSON.parse(stdout.slice('ready;'.length)), invite, 'the revoke found the claimed invite');
+
+    assert.deepEqual(store.load().invites, [], 'the restore did not bring it back');
+    assertInvalid(await inviteOptions(ctx, { token }), 'revoked link, new options');
+    const response = registrationResponse({ credential: makeCredential(), challenge: Buffer.from(spare.json.publicKey.challenge, 'base64url'), rpId: 'localhost', origin: ctx.origin });
+    assertInvalid(await post(ctx, '/auth/passkey/invite/verify', { body: { token, challenge_id: spare.json.challenge_id, credential: response } }), 'revoked link, earlier challenge');
+    assert.equal(members(layout).length, 0);
+  });
+});
+
+test('invites: a full identity store returns 507, creates no user, and keeps the invite for a retry', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const owner = await ownerSession(ctx);
+    const { token, invite } = await createInvite(ctx, owner);
+    // Fill the identity store to just under its cap with invented members.
+    const doc = JSON.parse(fs.readFileSync(layout.identityStore, 'utf8'));
+    const bytes = () => Buffer.byteLength(`${JSON.stringify(doc, null, 2)}\n`);
+    const credential = (idBytes, keyBytes) => ({
+      id: crypto.randomBytes(idBytes).toString('base64url'),
+      public_key: Buffer.concat([Buffer.from([0xa5]), crypto.randomBytes(keyBytes - 1)]).toString('base64url'),
+      counter: 0, transports: ['usb'], created_at: doc.users[0].created_at, label: 'Test key',
+    });
+    const fill = (idBytes, keyBytes) => {
+      for (let index = 0; ; index += 1) {
+        let user = doc.users.at(-1);
+        if (user.role === 'owner' || user.credentials.length === 32) {
+          user = { id: `usr_filler${String(doc.users.length).padStart(4, '0')}`, display_name: 'Filler Member', role: 'member', disabled: false, created_at: doc.users[0].created_at, credentials: [] };
+          doc.users.push(user);
+        }
+        user.credentials.push(credential(idBytes, keyBytes));
+        if ((idBytes > 100 ? index * 4400 > MAX_FILE_BYTES - 64 * 1024 : true) && bytes() > MAX_FILE_BYTES) {
+          user.credentials.pop();
+          if (user.credentials.length === 0) doc.users.pop();
+          return;
+        }
+      }
+    };
+    fill(1023, 2048);
+    fill(16, 64);
+    fs.writeFileSync(layout.identityStore, JSON.stringify(doc, null, 2));
+    const before = members(layout).length;
+
+    const full = await enroll(ctx, token);
+    assert.equal(full.verify.status, 507, full.verify.text);
+    assert.equal(full.verify.json.error.code, 'store_full');
+    assert.equal(full.verify.headers['set-cookie'], undefined);
+    assert.equal(members(layout).length, before, 'no user was created');
+    assert.equal(findUser(identity(layout).load(), invite.user_id), null);
+    assert.deepEqual((await call({ port: ctx.port, pathname: '/auth/account/invites', cookie: owner.cookie })).json.invites, [invite], 'the invite was put back');
+
+    // Make room, then the same link enrolls.
+    doc.users = doc.users.filter((user) => user.role === 'owner');
+    fs.writeFileSync(layout.identityStore, JSON.stringify(doc, null, 2));
+    const retry = await enroll(ctx, token);
+    assert.equal(retry.verify.status, 201, retry.verify.text);
+    assert.equal(retry.verify.json.user_id, invite.user_id);
+  });
+});
+
 test('invites: if no session can be created, the enrollment still stands and the member signs in later', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout), async (ctx) => {
@@ -622,6 +759,20 @@ test('invites: invite traffic has its own rate-limit buckets: draining them leav
   for (let i = 0; i < 11; i += 1) optionStatuses.push((await apiRequest(other.api, '/auth/passkey/invite/options', { body: { token: fresh.token } })).status);
   assert.equal(optionStatuses.at(-1), 429);
   assert.equal((await apiRequest(other.api, '/auth/passkey/register/options', { cookie: 'operator' })).status, 200);
+});
+
+test('invites: bad tokens on invite options spend the failures bucket that also limits invite verify', async () => {
+  const { api } = apiSetup();
+  const statuses = [];
+  for (let i = 0; i < 10; i += 1) statuses.push((await apiRequest(api, '/auth/passkey/invite/options', { body: { token: 'A'.repeat(43) } })).status);
+  assert.deepEqual(statuses, Array(10).fill(400));
+  const junk = { token: 'B'.repeat(43), challenge_id: 'x'.repeat(43), credential: { rawId: 'AAAA' } };
+  const verify = await apiRequest(api, '/auth/passkey/invite/verify', { body: junk });
+  assert.equal(verify.status, 429, JSON.stringify(verify.json));
+
+  // A fresh server answers the same junk verify with the generic error.
+  const fresh = apiSetup();
+  assert.equal((await apiRequest(fresh.api, '/auth/passkey/invite/verify', { body: junk })).status, 400);
 });
 
 test('invites: invitation challenges have their own cap: filling it leaves sign-in and registration alone, and the reverse', async () => {
