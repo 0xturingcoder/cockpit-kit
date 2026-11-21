@@ -63,7 +63,8 @@ export const deviceLabel = ({ credentialLabel = '', userAgent = '' } = {}) => {
  * Authenticate requests by their session cookie.
  *
  * fromRequest(req) returns { session, user } for a live session whose user
- * exists and is not disabled, and null otherwise. Store errors fail closed
+ * exists and is not disabled, and whose passkey (if it has one) is still on
+ * that user, and null otherwise. Store errors fail closed
  * (null) and are logged as a code only.
  *
  * @param {object} options
@@ -99,6 +100,9 @@ export const createSessionAuth = ({ sessions, identityStore, log = () => {} }) =
       const data = identity();
       const user = data && findUser(data, session.user_id);
       if (!user || user.disabled) return null;
+      // A session ends with its passkey, however the passkey was removed.
+      // Sessions created without a passkey (credential_id null) are unaffected.
+      if (session.credential_id !== null && !user.credentials.some((credential) => credential.id === session.credential_id)) return null;
       return { session, user };
     } catch (error) {
       log(`session check failed (${error?.code ?? error?.name})`);

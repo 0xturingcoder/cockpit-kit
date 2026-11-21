@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { openIdentityStore } from '../skill/lib/identity/store.mjs';
+import { openSessionStore } from '../skill/lib/identity/sessions.mjs';
 import { IntentStore } from '../skill/lib/intents/store.mjs';
 import { deviceLabel } from '../skill/lib/identity/session-http.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
@@ -28,6 +29,13 @@ const setup = async (ctx, layout) => {
   const memberKey = makeCredential();
   const memberCredential = store.addCredential(member.id, { id: memberKey.rawId, publicKey: memberKey.cose, label: 'Member phone' });
   return { store, ownerKey, ownerId: owner.user_id, ownerCredentialId: owner.credential_id, member, memberKey, memberCredentialId: memberCredential.id };
+};
+
+// Hold a store's write lock as another writer would.
+const holdLock = (file) => {
+  const lockFile = `${file}.lock`;
+  fs.writeFileSync(lockFile, 'another-writer', { mode: 0o600 });
+  return lockFile;
 };
 
 const writeSessionsFile = (file, doc) => {
@@ -224,6 +232,40 @@ test('serve sessions: removing the passkey a session signed in with ends that se
     assert.equal((await call({ port: ctx.port, pathname: '/', cookie: viaFirst.cookie })).status, 401);
     assert.equal((await call({ port: ctx.port, pathname: '/', cookie: viaSpare.cookie })).status, 200);
     assert.equal(store.load().users[0].credentials[0].id, spare.id);
+  });
+});
+
+test('serve sessions: a session whose passkey was removed directly in the store is refused; passkey-less sessions are not', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const { store, member, memberKey, memberCredentialId } = await setup(ctx, layout);
+    const { cookie } = await signIn(ctx, memberKey, member.id);
+    const sessions = openSessionStore({ file: layout.sessionStore, root: layout.root });
+    const passkeyless = sessions.create({ userId: member.id, credentialId: null, label: 'No passkey' });
+    const passkeylessCookie = `cockpit_session=${passkeyless.token}`;
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie })).status, 200);
+    store.removeCredential(memberCredentialId);
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie })).status, 401);
+    assert.equal(sessions.list({ userId: member.id }).length, 2, 'the session is refused while still stored');
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie: passkeylessCookie })).status, 200);
+  });
+});
+
+test('serve sessions: a passkey removed while its sessions could not be revoked still ends them', async () => {
+  const layout = makeServeRoot();
+  await withServe(serveConfig(layout), async (ctx) => {
+    const { store, member, memberKey, memberCredentialId } = await setup(ctx, layout);
+    const { cookie } = await signIn(ctx, memberKey, member.id);
+    const sessions = openSessionStore({ file: layout.sessionStore, root: layout.root, lockWaitMs: 50 });
+    const lockFile = holdLock(layout.sessionStore);
+    try {
+      // The credential write succeeds; the session revoke cannot take the lock.
+      store.removeCredential(memberCredentialId);
+      assert.throws(() => sessions.revokeCredential(memberCredentialId), { code: 'store_busy' });
+      assert.equal((await call({ port: ctx.port, pathname: '/', cookie })).status, 401);
+    } finally {
+      fs.rmSync(lockFile, { force: true });
+    }
   });
 });
 
