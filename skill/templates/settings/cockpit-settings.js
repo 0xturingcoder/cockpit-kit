@@ -215,6 +215,8 @@
       event.preventDefault();
       createInvite(inviteForm, document.getElementById('invite-create'));
     });
+    // Do not keep a shown link in the back/forward cache.
+    window.addEventListener('pagehide', hideInviteLink);
     const copy = document.getElementById('invite-copy');
     copy.addEventListener('click', async () => {
       const input = document.getElementById('invite-url');
