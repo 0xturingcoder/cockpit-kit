@@ -7,6 +7,7 @@ import { stateDirFor } from './intents/store.mjs';
 import { IDENTITY_STORE_FILE, IdentityStoreError, assertOutsideRoot } from './identity/store.mjs';
 import { expandHome } from './paths.mjs';
 import { normalizeRelyingParty } from './identity/webauthn.mjs';
+import { DEFAULT_SESSION_LIFETIME_MS, MAX_SESSION_LIFETIME_MS, MIN_SESSION_LIFETIME_MS, SESSIONS_FILE } from './identity/sessions.mjs';
 
 export const DEFAULT_SERVE_HOST = '127.0.0.1';
 export const DEFAULT_SERVE_PORT = 18765;
@@ -52,10 +53,23 @@ export const DEFAULT_RP_ID = 'localhost';
 // origins are checked here so a mismatch fails at startup; without --origin
 // the server's own http://localhost:<port> origin is used (port 0 binds later,
 // so the check uses the bare localhost origin).
+const DURATION_UNITS = Object.freeze({ m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 });
+
+// A whole number of minutes, hours, or days, such as 90d, 12h, or 30m.
+export function parseSessionLifetime(value, source = '--session-lifetime') {
+  const match = /^([1-9][0-9]{0,5})([mhd])$/.exec(String(value));
+  const ms = match ? Number(match[1]) * DURATION_UNITS[match[2]] : Number.NaN;
+  if (!(ms >= MIN_SESSION_LIFETIME_MS && ms <= MAX_SESSION_LIFETIME_MS)) {
+    throw new ArgumentError(`${source} must be a whole number of minutes, hours, or days (for example 90d, 12h, or 30m) from 5m to 400d`);
+  }
+  return ms;
+}
+
 function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
   if (!flags.passkeys) {
     if (flags.rpId !== undefined) throw new ArgumentError('--rp-id requires --passkeys');
-    return { passkeys: false, rpId: null };
+    if (flags.sessionLifetime !== undefined) throw new ArgumentError('--session-lifetime requires --passkeys');
+    return { passkeys: false, rpId: null, sessionStore: null, sessionLifetimeMs: null };
   }
   if (!auth) throw new ArgumentError('serve --passkeys requires authentication; --passkeys --no-auth is not supported');
   if (!identityStore) throw new ArgumentError('serve --passkeys needs an identity store: pass --identity-store <path> or set HOME or XDG_STATE_HOME');
@@ -69,7 +83,12 @@ function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
   } catch {
     throw new ArgumentError(`--rp-id must be a lowercase domain name with at least two labels, or localhost (not an IP address), and every passkey origin must be https://<rp-id or a subdomain>[:port], or http://localhost[:port] with --rp-id localhost${origins.length ? '' : '; pass --origin for a non-localhost --rp-id'}`);
   }
-  return { passkeys: true, rpId };
+  // Sessions live next to the identity store, so they share its directory
+  // checks; the identity store path is already known to be outside the root.
+  const sessionStore = path.join(path.dirname(identityStore), SESSIONS_FILE);
+  if (sessionStore === identityStore) throw new ArgumentError(`--identity-store must not be named ${SESSIONS_FILE}; that name is used for the sessions file next to it`);
+  const sessionLifetimeMs = flags.sessionLifetime === undefined ? DEFAULT_SESSION_LIFETIME_MS : parseSessionLifetime(flags.sessionLifetime);
+  return { passkeys: true, rpId, sessionStore, sessionLifetimeMs };
 }
 
 export function parseOrigin(value, source = '--origin') {
@@ -99,6 +118,10 @@ function parseArgs(argv) {
       flags.rpId = takeValue(argv, index, arg);
       index += 1;
     } else if (arg.startsWith('--rp-id=')) flags.rpId = arg.slice('--rp-id='.length);
+    else if (arg === '--session-lifetime') {
+      flags.sessionLifetime = takeValue(argv, index, arg);
+      index += 1;
+    } else if (arg.startsWith('--session-lifetime=')) flags.sessionLifetime = arg.slice('--session-lifetime='.length);
     else if (arg === '--origin') {
       flags.origins = [...(flags.origins ?? []), parseOrigin(takeValue(argv, index, arg), '--origin')];
       index += 1;
