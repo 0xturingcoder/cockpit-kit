@@ -1,12 +1,14 @@
-// Same-origin JSON routes for passkey registration, invite enrollment, and
-// sign-in under /auth/passkey. The transport adapter (serve.mjs) supplies
-// operator authentication for registration and decides what a successful
-// sign-in grants. This module enforces exact Origin, JSON bodies, body
-// limits, rate limits, and the error mapping in docs/passkeys.md and
-// docs/invites.md.
+// Same-origin JSON routes for passkey registration, invite enrollment,
+// sign-in, recovery-token sign-in, and step-up under /auth/passkey. The
+// transport adapter (serve.mjs) supplies session authorization for
+// registration and step-up, the recovery token check and audit log, and
+// decides what a successful sign-in grants. This module enforces exact
+// Origin, JSON bodies, body limits, rate limits, and the error mapping in
+// docs/passkeys.md, docs/invites.md, and docs/recovery.md.
 import { ChallengeError } from './challenges.mjs';
 import { InviteStoreError } from './invites.mjs';
 import { PasskeyError } from './passkeys.mjs';
+import { RecoveryStoreError } from './recovery.mjs';
 import { IdentityStoreError, isSafeLabel } from './store.mjs';
 import { WebAuthnError } from './webauthn.mjs';
 
@@ -15,14 +17,18 @@ const BODY_LIMIT = 64 * 1024;
 const BODY_TIMEOUT_MS = 10000;
 // Token buckets, shared by all clients: a loopback server behind a proxy
 // cannot tell clients apart without trusting forwarded headers. Sign-in,
-// registration, and invite enrollment have separate buckets, so anonymous
-// sign-in or invite traffic cannot rate-limit the operator out of adding a
-// passkey, or each other.
+// registration, invite enrollment, and step-up have separate buckets, so
+// anonymous sign-in or invite traffic cannot rate-limit the owner out of
+// adding a passkey, or each other. Recovery-token attempts (sign-in and
+// first-owner setup) share one small bucket, and every attempt takes a token.
 const RATES = Object.freeze({
   options: { perMinute: 30, burst: 10 },
   failures: { perMinute: 10, burst: 10 },
+  recovery: { perMinute: 5, burst: 5 },
 });
-const CEREMONY_BUCKETS = Object.freeze(['login', 'register', 'invite']);
+const CEREMONY_BUCKETS = Object.freeze(['login', 'register', 'invite', 'step-up']);
+// Recovery sessions last at most this long, however long --session-lifetime is.
+export const RECOVERY_SESSION_MAX_MS = 12 * 60 * 60 * 1000;
 
 export const PASSKEY_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
@@ -136,9 +142,16 @@ const STORE_MESSAGES = Object.freeze({
   store_busy: 'The identity store is busy; retry shortly.',
 });
 
-// Registration is operator-only, so specific reasons help and leak nothing.
+const REGISTRATION_PASSKEY_ERRORS = Object.freeze({
+  owner_exists: () => new HttpError(409, 'owner_exists', 'The owner already exists; sign in, then add a passkey from the settings page.'),
+  not_owner: () => new HttpError(403, 'forbidden', 'Only the owner can add a passkey here.'),
+  wrong_session: () => new HttpError(400, 'wrong_session', 'This registration was started by another session or sign-in; start again.'),
+});
+
+// Registration is owner-only, so specific reasons help and leak nothing.
 const registrationError = (error) => {
   if (error instanceof WebAuthnError || error instanceof ChallengeError) return new HttpError(400, error.code, error.message);
+  if (error instanceof PasskeyError && REGISTRATION_PASSKEY_ERRORS[error.code]) return REGISTRATION_PASSKEY_ERRORS[error.code]();
   if (error instanceof IdentityStoreError && STORE_STATUS[error.code]) {
     const [status, code] = STORE_STATUS[error.code];
     // invalid_argument messages name the field and rule, never the value.
@@ -179,6 +192,21 @@ const inviteError = (error) => {
   return error;
 };
 
+// Step-up: every failure looks the same, like sign-in.
+const STEP_UP_FAILED = () => new HttpError(401, 'step_up_failed', 'The passkey check failed; try again.');
+
+const stepUpError = (error) => {
+  if (error instanceof WebAuthnError || error instanceof ChallengeError || error instanceof PasskeyError) return STEP_UP_FAILED();
+  if (error instanceof IdentityStoreError) {
+    if (error.code === 'store_busy') return new HttpError(503, 'store_busy', STORE_MESSAGES.store_busy, { 'Retry-After': '2' });
+    if (SIGN_IN_REASONS.has(error.code)) return STEP_UP_FAILED();
+  }
+  return error;
+};
+
+// Recovery token: a wrong, malformed, or missing token all look the same.
+const RECOVERY_FAILED = () => new HttpError(401, 'recovery_failed', 'The recovery token is not valid.');
+
 const challengeIssueError = (error) => (error instanceof ChallengeError
   ? new HttpError(503, error.code, error.message, { 'Retry-After': '10' })
   : error);
@@ -187,7 +215,21 @@ const challengeIssueError = (error) => (error instanceof ChallengeError
  * @param {object} options
  * @param {ReturnType<import('./passkeys.mjs').createPasskeyCeremonies>} options.ceremonies
  * @param {() => Iterable<string>} options.allowedOrigins Exact origins (config).
- * @param {(req) => boolean} options.isOperator True when the request carries operator auth (registration).
+ * @param {(req) => { userId: string, sessionId: string } | null} [options.authorizeRegistration]
+ *   The live owner session allowed to add a passkey (CSRF and step-up checked), or null when the request has no
+ *   session; throws HttpError to refuse (a member session, a bad CSRF token, a stale step-up). With null, only the
+ *   first owner can be created, with the recovery token in the body.
+ * @param {(req) => { userId: string, sessionId: string }} [options.authorizeStepUp]
+ *   The live owner session (CSRF checked) that may step up; throws HttpError to refuse.
+ * @param {(session: { userId: string, sessionId: string }) => string} [options.onStepUp]
+ *   Records a verified step-up on the session and returns its new step_up_at; throws HttpError to refuse.
+ * @param {(result, session: { userId: string, sessionId: string }) => void} [options.onRegistered]
+ *   Called after a session added a passkey.
+ * @param {{ check: (token: unknown) => boolean, owner: () => { id: string } | null, record: (event: string, result: string) => void }} [options.recovery]
+ *   The recovery token check, the current owner, and the audit log. Without it the recovery routes return 404
+ *   and the first owner cannot be created.
+ * @param {(owner: { userId: string }, context: { origin: string, req: import('node:http').IncomingMessage }) => Record<string, string>} [options.onRecoverySignIn]
+ *   Creates the owner's recovery session after a valid recovery token; returns response headers.
  * @param {(result, context: { origin: string, req: import('node:http').IncomingMessage }) => Record<string, string>} options.onSignIn
  *   Called after a verified sign-in with { userId, role, credentialId, credentialLabel, counter }, and after an
  *   invite enrollment with { userId, role, credentialId, credentialLabel, inviteId }; returns extra response
@@ -196,11 +238,15 @@ const challengeIssueError = (error) => (error instanceof ChallengeError
  * @param {(message: string) => void} [options.log] Receives error codes, never request data.
  * @param {() => number} [options.now] Clock for rate limits (tests).
  */
-export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSignIn, log = () => {}, now = Date.now }) => {
+export const createPasskeyApi = ({
+  ceremonies, allowedOrigins, authorizeRegistration = () => null, authorizeStepUp = null, onStepUp = () => null, onRegistered = () => {},
+  recovery = null, onRecoverySignIn = null, onSignIn, log = () => {}, now = Date.now,
+}) => {
   const buckets = Object.fromEntries(CEREMONY_BUCKETS.map((ceremony) => [ceremony, {
     options: createBucket(RATES.options, now),
     failures: createBucket(RATES.failures, now),
   }]));
+  const recoveryBucket = createBucket(RATES.recovery, now);
 
   const checkRequest = (req) => {
     const origin = req.headers.origin;
@@ -213,8 +259,50 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
     return origin;
   };
 
-  const requireOperator = (req) => {
-    if (!isOperator(req)) throw new HttpError(401, 'authentication_required', 'Sign in with the server token before adding a passkey.');
+  // Audit a refused recovery attempt; a failed write is logged, not fatal.
+  const auditQuietly = (event, result) => {
+    try {
+      recovery.record(event, result);
+    } catch (error) {
+      log(`audit write failed (${error?.code ?? error?.name})`);
+    }
+  };
+
+  // Every recovery-token attempt takes a token from the shared bucket.
+  const takeRecoveryAttempt = (event) => {
+    try {
+      recoveryBucket.take();
+    } catch (error) {
+      auditQuietly(event, 'rate_limited');
+      log(`passkey rate_limited (${event})`);
+      throw error;
+    }
+  };
+
+  const checkRecoveryToken = (event, token) => {
+    if (recovery.check(token)) return;
+    auditQuietly(event, 'invalid');
+    log(`passkey recovery_failed (${event})`);
+    throw RECOVERY_FAILED();
+  };
+
+  // Without a session, registration can only create the first owner, and
+  // only with the recovery token in the body.
+  const requireFirstOwnerToken = (body) => {
+    if (!recovery || body.recovery_token === undefined) {
+      throw new HttpError(401, 'authentication_required', 'Sign in as the owner (with a passkey or the recovery token) before adding a passkey.');
+    }
+    takeRecoveryAttempt('first_owner');
+    checkRecoveryToken('first_owner', body.recovery_token);
+    if (recovery.owner()) {
+      auditQuietly('first_owner', 'owner_exists');
+      throw REGISTRATION_PASSKEY_ERRORS.owner_exists();
+    }
+  };
+
+  const requireStepUpSession = (req) => {
+    if (!authorizeStepUp) throw new HttpError(404, 'not_found', 'Unknown passkey route.');
+    return authorizeStepUp(req);
   };
 
   // The invite token is checked by the invites store; a missing or malformed
@@ -273,26 +361,84 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
       }
       return { status: 201, body: { enrolled: true, signed_in: true, user_id: result.userId }, headers };
     },
+    // A live owner session with a fresh step-up adds a passkey to the owner;
+    // without a session, the recovery token creates the first owner. A live
+    // session always wins, so a member session with a token is refused.
     '/register/options': async (req) => {
       checkRequest(req);
-      requireOperator(req);
+      const signedIn = authorizeRegistration(req);
       buckets.register.options.take();
       const body = parseJson(await readBody(req));
+      if (!signedIn) requireFirstOwnerToken(body);
       try {
-        const options = ceremonies.startRegistration({ displayName: body.display_name });
+        const options = signedIn
+          ? ceremonies.startRegistration({ userId: signedIn.userId, sessionId: signedIn.sessionId })
+          : ceremonies.startRegistration({ displayName: body.display_name, firstOwner: true });
         return { status: 200, body: { challenge_id: options.challengeId, publicKey: options.publicKey } };
       } catch (error) {
         throw registrationError(challengeIssueError(error));
       }
     },
+    // Authorized after the body is read, so the step-up (or recovery
+    // enrollment window) is checked right before the passkey is written.
     '/register/verify': async (req) => {
       checkRequest(req);
-      requireOperator(req);
       const body = parseJson(await readBody(req));
+      const signedIn = authorizeRegistration(req);
       const fields = verifyFields(body);
+      if (!signedIn) requireFirstOwnerToken(body);
       const label = body.label === undefined ? '' : body.label;
-      const result = attempt(buckets.register.failures, () => ceremonies.finishRegistration({ ...fields, label }), registrationError);
+      const bound = signedIn ? { sessionId: signedIn.sessionId } : { firstOwner: true };
+      const result = attempt(buckets.register.failures, () => ceremonies.finishRegistration({ ...fields, label, ...bound }), registrationError);
+      if (signedIn) onRegistered(result, signedIn);
+      else auditQuietly('first_owner', 'ok');
       return { status: 201, body: { registered: true, user_id: result.userId, credential_id: result.credentialId, created_owner: result.createdOwner } };
+    },
+    // Owner-only: the server's recovery token signs the owner in with a
+    // recovery session. Every attempt is rate limited and audited; a
+    // successful one is refused if it cannot be audited.
+    '/recovery/sign-in': async (req) => {
+      const origin = checkRequest(req);
+      if (!recovery || !onRecoverySignIn) throw new HttpError(404, 'not_found', 'Unknown passkey route.');
+      takeRecoveryAttempt('token_sign_in');
+      const body = parseJson(await readBody(req));
+      checkRecoveryToken('token_sign_in', body.token);
+      const owner = recovery.owner();
+      if (!owner) {
+        auditQuietly('token_sign_in', 'no_owner');
+        throw new HttpError(409, 'no_owner', 'There is no owner yet; create the owner with the recovery token first.');
+      }
+      try {
+        recovery.record('token_sign_in', 'ok');
+      } catch (error) {
+        log(`audit write failed (${error?.code ?? error?.name})`);
+        throw new HttpError(503, 'audit_unavailable', 'The recovery sign-in could not be recorded; retry shortly.', { 'Retry-After': '5' });
+      }
+      const headers = onRecoverySignIn({ userId: owner.id }, { origin, req });
+      return { status: 200, body: { signed_in: true, user_id: owner.id, recovery: true }, headers };
+    },
+    '/step-up/options': async (req) => {
+      checkRequest(req);
+      const signedIn = requireStepUpSession(req);
+      buckets['step-up'].options.take();
+      parseJson(await readBody(req));
+      const options = attempt(buckets['step-up'].failures, () => {
+        try {
+          return ceremonies.startStepUp(signedIn);
+        } catch (error) {
+          throw challengeIssueError(error);
+        }
+      }, (error) => (error instanceof HttpError ? error : stepUpError(error)));
+      return { status: 200, body: { challenge_id: options.challengeId, publicKey: options.publicKey } };
+    },
+    '/step-up/verify': async (req) => {
+      checkRequest(req);
+      const body = parseJson(await readBody(req));
+      const signedIn = requireStepUpSession(req);
+      const fields = verifyFields(body);
+      attempt(buckets['step-up'].failures, () => ceremonies.finishStepUp({ ...fields, ...signedIn }), stepUpError);
+      const stepUpAt = onStepUp(signedIn);
+      return { status: 200, body: { stepped_up: true, step_up_at: stepUpAt } };
     },
     '/login/options': async (req) => {
       checkRequest(req);
@@ -318,7 +464,7 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
   const sendError = (res, error) => {
     if (error instanceof HttpError) return sendJson(res, error.status, { error: { code: error.code, message: error.message } }, error.extra);
     log(`passkey internal_error${error?.code ? ` (${error.code})` : ''}`);
-    if (error instanceof IdentityStoreError || error instanceof InviteStoreError) {
+    if (error instanceof IdentityStoreError || error instanceof InviteStoreError || error instanceof RecoveryStoreError) {
       return sendJson(res, 503, { error: { code: 'identity_unavailable', message: 'The identity store is unavailable.' } }, { 'Retry-After': '5' });
     }
     return sendJson(res, 500, { error: { code: 'internal_error', message: 'Internal error.' } });

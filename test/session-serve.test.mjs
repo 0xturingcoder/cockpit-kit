@@ -12,7 +12,7 @@ import { IntentStore } from '../skill/lib/intents/store.mjs';
 import { deviceLabel } from '../skill/lib/identity/session-http.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
 import { makeCredential } from './support/webauthn-synthetic.mjs';
-import { call, makeServeRoot, registerOwner, serveConfig, signIn, withServe } from './support/serve-harness.mjs';
+import { call, makeServeRoot, recoverySignIn, registerOwner, serveConfig, signIn, withServe } from './support/serve-harness.mjs';
 
 const account = (ctx, cookie) => call({ port: ctx.port, pathname: '/auth/account', cookie });
 
@@ -58,15 +58,26 @@ test('serve sessions: the cookie is HttpOnly, SameSite=Strict, Path=/, with Max-
   });
 });
 
-test('serve sessions: on an https origin the cookie is Secure', async () => {
+test('serve sessions: when every passkey origin is https the cookie is __Host-cockpit_session, Secure, and the only name read', async () => {
   const layout = makeServeRoot();
   const origin = 'https://cockpit.example.com';
   await withServe(serveConfig(layout, ['--rp-id', 'example.com', '--origin', origin]), async (ctx) => {
     const https = { ...ctx, origin };
     const key = makeCredential();
     const owner = await registerOwner(https, key, { rpId: 'example.com' });
-    const { res } = await signIn(https, key, owner.user_id, { rpId: 'example.com' });
-    assert.match(res.headers['set-cookie'][0], /; HttpOnly; SameSite=Strict; Path=\/; Max-Age=7776000; Secure$/);
+    const { res, cookie } = await signIn(https, key, owner.user_id, { rpId: 'example.com' });
+    assert.match(res.headers['set-cookie'][0], /^__Host-cockpit_session=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=7776000; Secure$/);
+    assert.doesNotMatch(res.headers['set-cookie'][0], /Domain=/i);
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie })).status, 200);
+    // The same token under the plain name (as a cookie planted over http would be) is ignored.
+    const plain = cookie.replace(/^__Host-cockpit_session=/, 'cockpit_session=');
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie: plain })).status, 401);
+    const csrf = (await account(ctx, cookie)).json.csrf_token;
+    const out = await post(https, '/auth/account/sign-out', { cookie, csrf });
+    assert.equal(out.status, 200, out.text);
+    for (const name of ['cockpit_session', '__Host-cockpit_session', 'cockpit_serve']) {
+      assert.ok(out.headers['set-cookie'].includes(`${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure`), name);
+    }
   });
 });
 
@@ -89,7 +100,8 @@ test('serve sessions: each sign-in is its own session; a user lists them and rev
     const current = view.json.sessions.find((s) => s.current);
     assert.equal(current.id, view.json.session_id);
     for (const s of view.json.sessions) {
-      assert.deepEqual(Object.keys(s).sort(), ['created_at', 'credential_id', 'current', 'expires_at', 'id', 'label', 'last_seen_at', 'user_id']);
+      assert.deepEqual(Object.keys(s).sort(), ['created_at', 'credential_id', 'current', 'expires_at', 'id', 'kind', 'label', 'last_seen_at', 'step_up_at', 'user_id']);
+      assert.equal(s.kind, 'passkey');
     }
     assert.equal(view.headers['cache-control'], 'no-store');
     assert.match(view.headers['content-security-policy'], /default-src 'none'/);
@@ -394,19 +406,20 @@ test('serve sessions: the settings page is served with the login page security h
   });
 });
 
-test('serve sessions: intents routes accept an owner passkey session with a session-bound CSRF token', async () => {
+test('serve sessions: intents routes accept an owner passkey or recovery session with a session-bound CSRF token, and not the server token', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout, ['--write']), async (ctx) => {
     const { ownerKey, ownerId, member, memberKey } = await setup(ctx, layout);
     const ownerA = await signIn(ctx, ownerKey, ownerId);
     const ownerB = await signIn(ctx, ownerKey, ownerId);
+    const recovery = await recoverySignIn(ctx);
     const caps = await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: ownerA.cookie });
     assert.equal(caps.status, 200, caps.text);
     const csrfA = caps.json.csrf_token;
     assert.equal(csrfA, (await account(ctx, ownerA.cookie)).json.csrf_token, 'one CSRF token per session for both APIs');
     const csrfB = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: ownerB.cookie })).json.csrf_token;
-    const csrfToken = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: `cockpit_serve=${ctx.token}` })).json.csrf_token;
-    assert.equal(new Set([csrfA, csrfB, csrfToken]).size, 3);
+    const csrfRecovery = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: recovery.cookie })).json.csrf_token;
+    assert.equal(new Set([csrfA, csrfB, csrfRecovery]).size, 3);
 
     const capture = (n) => ({ schema_version: 1, request_id: `00000000-0000-4000-8000-00000000000${n}`, mode: 'capture', operator_message: 'Remember this', target: null });
     const create = (cookie, csrf, n) => call({
@@ -417,13 +430,21 @@ test('serve sessions: intents routes accept an owner passkey session with a sess
     const intent = (await call({ port: ctx.port, pathname: `/api/cockpit/v1/intents/${created.json.intent_id}`, cookie: ownerA.cookie })).json;
     assert.equal(intent.intent_id, created.json.intent_id);
     assert.equal((await create(ownerA.cookie, csrfB, 2)).json.error.code, 'csrf_invalid', 'another session\'s CSRF token is refused');
-    assert.equal((await create(ownerA.cookie, csrfToken, 2)).json.error.code, 'csrf_invalid');
+    assert.equal((await create(ownerA.cookie, csrfRecovery, 2)).json.error.code, 'csrf_invalid');
     assert.equal((await create(ownerB.cookie, csrfB, 2)).status, 201);
-    // The server token keeps working on every intents route.
-    assert.equal((await create(`cockpit_serve=${ctx.token}`, csrfToken, 3)).status, 201);
+    // A recovery session acts as the owner on the intents API.
+    assert.equal((await create(recovery.cookie, csrfRecovery, 3)).status, 201);
     const listed = await call({ port: ctx.port, pathname: '/api/cockpit/v1/intents', cookie: ownerA.cookie });
     assert.equal(listed.status, 200);
     assert.equal(listed.json.items.length, 3);
+    const state = new IntentStore({ root: layout.root, env: layout.env }).read();
+    assert.ok(state.intents.every((item) => item.provenance.principal_id === ownerId));
+
+    // With --passkeys the server token authenticates nothing.
+    const tokenCookie = `cockpit_serve=${ctx.token}`;
+    const tokenCaps = await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: tokenCookie });
+    assert.equal(tokenCaps.status, 401);
+    assert.equal((await create(tokenCookie, csrfA, 4)).status, 401);
 
     // Member sessions are refused on every intents route.
     const memberSession = await signIn(ctx, memberKey, member.id);
@@ -441,13 +462,13 @@ test('serve sessions: intents routes accept an owner passkey session with a sess
   });
 });
 
-test('serve sessions: a member session wins over the server-token cookie on intents routes', async () => {
+test('serve sessions: a member session plus the server-token cookie is still a member on intents routes', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout, ['--write']), async (ctx) => {
     const { member, memberKey } = await setup(ctx, layout);
     const tokenCookie = `cockpit_serve=${ctx.token}`;
-    const tokenCsrf = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: tokenCookie })).json.csrf_token;
     const memberSession = await signIn(ctx, memberKey, member.id);
+    const memberCsrf = (await account(ctx, memberSession.cookie)).json.csrf_token;
     const both = `${memberSession.cookie}; ${tokenCookie}`;
     for (const pathname of ['/api/cockpit/v1/capabilities', '/api/cockpit/v1/intents']) {
       const res = await call({ port: ctx.port, pathname, cookie: both });
@@ -456,7 +477,7 @@ test('serve sessions: a member session wins over the server-token cookie on inte
     }
     const created = await call({
       port: ctx.port, method: 'POST', pathname: '/api/cockpit/v1/intents', cookie: both, origin: ctx.origin,
-      body: { schema_version: 1, request_id: '00000000-0000-4000-8000-0000000000bb', mode: 'capture', operator_message: 'Note', target: null }, headers: { 'X-Cockpit-CSRF': tokenCsrf },
+      body: { schema_version: 1, request_id: '00000000-0000-4000-8000-0000000000bb', mode: 'capture', operator_message: 'Note', target: null }, headers: { 'X-Cockpit-CSRF': memberCsrf },
     });
     assert.equal(created.status, 403, created.text);
     assert.equal(created.json.error.code, 'forbidden');

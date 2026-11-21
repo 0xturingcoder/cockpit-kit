@@ -11,6 +11,7 @@ import { once } from 'node:events';
 import { DEFAULT_MAX_CHALLENGES } from '../skill/lib/identity/challenges.mjs';
 import { createPasskeyApi } from '../skill/lib/identity/passkey-http.mjs';
 import { createPasskeyCeremonies } from '../skill/lib/identity/passkeys.mjs';
+import { openRecoveryStore } from '../skill/lib/identity/recovery.mjs';
 import { IdentityStoreError, openIdentityStore } from '../skill/lib/identity/store.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
 import { writeConfig } from '../skill/lib/config.mjs';
@@ -48,7 +49,7 @@ test('http: store_full, store_busy, and invalid_argument become clear client err
     fakeRequest.api = createPasskeyApi({
       ceremonies: { finishRegistration: () => { throw new IdentityStoreError('label must be at most 64 characters', storeCode); } },
       allowedOrigins: () => [ORIGIN],
-      isOperator: () => true,
+      authorizeRegistration: () => ({ userId: 'usr_ownerEXAMPLEonly0001', sessionId: 'ses_EXAMPLEonlyAAAAAAAAAAA' }),
       onSignIn: () => ({}),
     });
     const res = await fakeRequest('/auth/passkey/register/verify', { body: JSON.stringify({ challenge_id: 'x', credential: {} }) });
@@ -63,7 +64,6 @@ test('http: store_busy during sign-in is a retryable 503; corrupt stores are 503
     fakeRequest.api = createPasskeyApi({
       ceremonies: { finishAuthentication: () => { throw new IdentityStoreError('x', storeCode); } },
       allowedOrigins: () => [ORIGIN],
-      isOperator: () => false,
       onSignIn: () => ({}),
     });
     const res = await fakeRequest('/auth/passkey/login/verify', { body: JSON.stringify({ challenge_id: 'x', credential: {} }) });
@@ -73,7 +73,7 @@ test('http: store_busy during sign-in is a retryable 503; corrupt stores are 503
 });
 
 test('http: requests need an exact allowed Origin, same-origin fetch metadata, JSON, POST, and no query string', async () => {
-  fakeRequest.api = createPasskeyApi({ ceremonies: { startAuthentication: () => ({ challengeId: 'id', publicKey: {} }) }, allowedOrigins: () => [ORIGIN], isOperator: () => false, onSignIn: () => ({}) });
+  fakeRequest.api = createPasskeyApi({ ceremonies: { startAuthentication: () => ({ challengeId: 'id', publicKey: {} }) }, allowedOrigins: () => [ORIGIN], onSignIn: () => ({}) });
   assert.equal((await fakeRequest('/auth/passkey/login/options')).status, 200);
   assert.equal((await fakeRequest('/auth/passkey/login/options', { headers: { Origin: 'https://evil.example' } })).status, 403);
   assert.equal((await fakeRequest('/auth/passkey/login/options', { headers: { Origin: '' } })).status, 403);
@@ -86,7 +86,7 @@ test('http: requests need an exact allowed Origin, same-origin fetch metadata, J
   assert.equal(big.status, 413);
 });
 
-test('http: draining sign-in rate limits and challenge slots does not starve operator registration', async () => {
+test('http: draining sign-in rate limits and challenge slots does not starve first-owner registration', async () => {
   const base = tempDir('cockpit-passkeys-http-');
   const root = path.join(base, 'root');
   fs.mkdirSync(root);
@@ -95,11 +95,11 @@ test('http: draining sign-in rate limits and challenge slots does not starve ope
   // The rate-limit clock is separate from the challenge clock, so refilling
   // tokens does not expire the challenges already issued.
   let at = 0;
-  const operatorCookie = 'operator';
+  const recoveryToken = crypto.randomBytes(32).toString('base64url');
   fakeRequest.api = createPasskeyApi({
     ceremonies,
     allowedOrigins: () => [ORIGIN],
-    isOperator: (req) => req.headers.cookie === operatorCookie,
+    recovery: { check: (token) => token === recoveryToken, owner: () => null, record: () => {} },
     onSignIn: () => ({}),
     now: () => at,
   });
@@ -125,11 +125,11 @@ test('http: draining sign-in rate limits and challenge slots does not starve ope
   for (let i = 0; i < 10; i += 1) assert.equal((await fakeRequest('/auth/passkey/login/verify', { body: badSignIn })).status, 401);
   assert.equal((await fakeRequest('/auth/passkey/login/verify', { body: badSignIn })).status, 429);
 
-  // Operator registration still gets options and completes.
-  const options = await fakeRequest('/auth/passkey/register/options', { body: JSON.stringify({ display_name: 'Ada Example' }), headers: { Cookie: operatorCookie } });
+  // First-owner registration with the recovery token still gets options and completes.
+  const options = await fakeRequest('/auth/passkey/register/options', { body: JSON.stringify({ display_name: 'Ada Example', recovery_token: recoveryToken }) });
   assert.equal(options.status, 200, JSON.stringify(options.body));
   const response = registrationResponse({ credential: makeCredential(), challenge: Buffer.from(options.body.publicKey.challenge, 'base64url'), rpId: 'example.com', origin: ORIGIN });
-  const verify = await fakeRequest('/auth/passkey/register/verify', { body: JSON.stringify({ challenge_id: options.body.challenge_id, credential: response }), headers: { Cookie: operatorCookie } });
+  const verify = await fakeRequest('/auth/passkey/register/verify', { body: JSON.stringify({ challenge_id: options.body.challenge_id, credential: response, recovery_token: recoveryToken }) });
   assert.equal(verify.status, 201, JSON.stringify(verify.body));
   assert.equal(verify.body.created_owner, true);
   // Sign-in stays limited.
@@ -159,12 +159,13 @@ const serveConfig = (layout, extra = []) => parseServeConfig({ argv: ['--passkey
 
 const withServe = async (config, fn) => {
   const token = crypto.randomBytes(32).toString('hex');
+  const recoveryToken = config.passkeys ? openRecoveryStore({ file: config.recoveryStore, root: config.root }).ensure().token : null;
   const server = createServeServer(config, { token, log: () => {} });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { port } = server.address();
   try {
-    await fn({ port, token, origin: `http://localhost:${port}` });
+    await fn({ port, token, recoveryToken, origin: `http://localhost:${port}` });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -197,13 +198,26 @@ const call = ({ port, method = 'GET', pathname, body, origin, cookie, headers = 
   req.end(body === undefined ? undefined : JSON.stringify(body));
 });
 
-const serveRegister = async ({ port, origin, token }, credential, body = { display_name: 'Ada Example' }) => {
-  const cookie = `cockpit_serve=${token}`;
-  const options = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body, origin, cookie });
+// The first registration creates the owner with the recovery token; later
+// ones come from an owner session (a passkey sign-in counts as a fresh step-up).
+const serveRegister = async (ctx, credential, body = { display_name: 'Ada Example' }, { session } = {}) => {
+  const { port, origin, recoveryToken } = ctx;
+  const auth = session
+    ? { cookie: session.cookie, headers: { 'X-Cockpit-CSRF': session.csrf } }
+    : { extra: { recovery_token: recoveryToken } };
+  const options = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { ...body, ...auth.extra }, origin, cookie: auth.cookie, headers: auth.headers });
   assert.equal(options.status, 200, options.text);
   const response = registrationResponse({ credential, challenge: Buffer.from(options.json.publicKey.challenge, 'base64url'), rpId: 'localhost', origin });
-  const verify = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response }, origin, cookie });
+  const verify = await call({
+    port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response, ...auth.extra }, origin, cookie: auth.cookie, headers: auth.headers,
+  });
   return { options: options.json, verify };
+};
+
+const sessionOf = async ({ port }, res) => {
+  const cookie = res.headers['set-cookie'][0].split(';')[0];
+  const account = await call({ port, pathname: '/auth/account', cookie });
+  return { cookie, csrf: account.json.csrf_token };
 };
 
 const serveSignInAttempt = async ({ port, origin }, credential, { userId, signCount = 1, mutate = (r) => r } = {}) => {
@@ -225,12 +239,13 @@ test('serve: passkey registration and sign-in work end to end for ES256 and RS25
     const userId = verify.json.user_id;
 
     const rs = makeCredential({ alg: -257 });
-    const second = await serveRegister(ctx, rs, {});
+    const session = await sessionOf(ctx, await serveSignInAttempt(ctx, es, { userId, signCount: 1 }));
+    const second = await serveRegister(ctx, rs, {}, { session });
     assert.equal(second.verify.status, 201, second.verify.text);
     assert.equal(second.verify.json.user_id, userId);
 
     for (const credential of [es, rs]) {
-      const res = await serveSignInAttempt(ctx, credential, { userId, signCount: 2 });
+      const res = await serveSignInAttempt(ctx, credential, { userId, signCount: 5 });
       assert.equal(res.status, 200, res.text);
       assert.deepEqual(res.json, { signed_in: true, user_id: userId });
       const cookie = res.headers['set-cookie']?.[0] ?? '';
@@ -243,14 +258,21 @@ test('serve: passkey registration and sign-in work end to end for ES256 and RS25
   });
 });
 
-test('serve: registration requires the operator session', async () => {
+test('serve: registration needs a live owner session, or the recovery token while there is no owner', async () => {
   const layout = makeServeRoot();
-  await withServe(serveConfig(layout), async ({ port, origin }) => {
+  await withServe(serveConfig(layout), async ({ port, origin, token, recoveryToken }) => {
     const res = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example' }, origin });
     assert.equal(res.status, 401);
     assert.equal(res.json.error.code, 'authentication_required');
+    // The per-start server token is not accepted, as a cookie or in the body.
+    const tokenCookie = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example' }, origin, cookie: `cockpit_serve=${token}` });
+    assert.equal(tokenCookie.status, 401);
+    const wrong = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example', recovery_token: token }, origin });
+    assert.equal(wrong.status, 401);
+    assert.equal(wrong.json.error.code, 'recovery_failed');
     const verify = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: 'x', credential: {} }, origin, cookie: 'cockpit_serve=wrong' });
     assert.equal(verify.status, 401);
+    assert.ok(!JSON.stringify([res, tokenCookie, wrong, verify].map((r) => r.text)).includes(recoveryToken));
   });
 });
 
@@ -339,14 +361,13 @@ test('serve: configured --rp-id and --origin are used instead of request headers
   const layout = makeServeRoot();
   const config = serveConfig(layout, ['--rp-id', 'example.com', '--origin', 'https://cockpit.example.com']);
   assert.equal(config.rpId, 'example.com');
-  await withServe(config, async ({ port, token }) => {
+  await withServe(config, async ({ port, recoveryToken }) => {
     const origin = 'https://cockpit.example.com';
-    const cookie = `cockpit_serve=${token}`;
-    const options = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example' }, origin, cookie });
+    const options = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example', recovery_token: recoveryToken }, origin });
     assert.equal(options.json.publicKey.rp.id, 'example.com');
     const credential = makeCredential();
     const response = registrationResponse({ credential, challenge: Buffer.from(options.json.publicKey.challenge, 'base64url'), rpId: 'example.com', origin });
-    const verify = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response }, origin, cookie });
+    const verify = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response, recovery_token: recoveryToken }, origin });
     assert.equal(verify.status, 201, verify.text);
     const login = await call({ port, method: 'POST', pathname: '/auth/passkey/login/options', body: {}, origin });
     const good = authenticationResponse({ credential, challenge: Buffer.from(login.json.publicKey.challenge, 'base64url'), rpId: 'example.com', origin, signCount: 3, userHandle: Buffer.from(verify.json.user_id) });
@@ -391,10 +412,14 @@ test('serve: the login page is served before auth with a strict CSP, no inline s
     assert.equal(redirect.status, 301);
     assert.equal(redirect.headers.location, '/auth/login/');
 
-    const tokenRedirect = await call({ port, pathname: `/auth/login/?token=${token}` });
-    assert.equal(tokenRedirect.status, 302);
-    assert.equal(tokenRedirect.headers.location, '/auth/login/');
-    assert.match(tokenRedirect.headers['set-cookie'][0], /^cockpit_serve=/);
+    // With --passkeys the tokenized URL is ignored: no redirect, no cookie.
+    const tokenUrl = await call({ port, pathname: `/auth/login/?token=${token}` });
+    assert.equal(tokenUrl.status, 200);
+    assert.equal(tokenUrl.headers['set-cookie'], undefined);
+    const tokenRoot = await call({ port, pathname: `/?token=${token}` });
+    assert.equal(tokenRoot.status, 401);
+    assert.equal(tokenRoot.headers['set-cookie'], undefined);
+    assert.equal((await call({ port, pathname: '/', cookie: `cockpit_serve=${token}` })).status, 401, 'nor is the cookie accepted');
 
     const other = await call({ port, pathname: '/' });
     assert.equal(other.status, 401);
@@ -449,19 +474,19 @@ test('serve config: passkey options are validated at startup and come only from 
 
 test('serve: failed registration attempts map verifier errors to specific codes for the operator', async () => {
   const layout = makeServeRoot();
-  await withServe(serveConfig(layout), async ({ port, origin, token }) => {
-    const cookie = `cockpit_serve=${token}`;
-    const options = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example' }, origin, cookie });
+  await withServe(serveConfig(layout), async ({ port, origin, recoveryToken }) => {
+    const auth = { recovery_token: recoveryToken };
+    const options = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example', ...auth }, origin });
     const response = registrationResponse({ credential: makeCredential(), challenge: Buffer.from(options.json.publicKey.challenge, 'base64url'), rpId: 'localhost', origin, fmt: 'packed' });
-    const res = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response }, origin, cookie });
+    const res = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response, ...auth }, origin });
     assert.equal(res.status, 400);
     assert.equal(res.json.error.code, 'unsupported_attestation');
-    const again = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response }, origin, cookie });
+    const again = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: options.json.challenge_id, credential: response, ...auth }, origin });
     assert.equal(again.json.error.code, 'challenge_unknown');
     const flags = FLAGS.UP | FLAGS.AT;
-    const o2 = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example' }, origin, cookie });
+    const o2 = await call({ port, method: 'POST', pathname: '/auth/passkey/register/options', body: { display_name: 'Ada Example', ...auth }, origin });
     const r2 = registrationResponse({ credential: makeCredential(), challenge: Buffer.from(o2.json.publicKey.challenge, 'base64url'), rpId: 'localhost', origin, flags });
-    const res2 = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: o2.json.challenge_id, credential: r2 }, origin, cookie });
+    const res2 = await call({ port, method: 'POST', pathname: '/auth/passkey/register/verify', body: { challenge_id: o2.json.challenge_id, credential: r2, ...auth }, origin });
     assert.equal(res2.json.error.code, 'user_not_verified');
   });
 });

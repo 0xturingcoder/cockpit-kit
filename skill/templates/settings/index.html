@@ -12,12 +12,23 @@
   <main class="login settings">
     <h1>Devices</h1>
     <p id="signed-in-as" class="hint"></p>
+    <p id="recovery-banner" class="notice" hidden>Signed in with the recovery token. Adding a passkey or creating an invite asks you to confirm with a passkey first. Sign out when you are done.</p>
 
     <section aria-labelledby="sessions-heading" id="sessions-section" hidden>
       <h2 id="sessions-heading">Signed-in devices</h2>
       <p>Each passkey sign-in is a separate session. Revoking one signs that device out on its next request.</p>
       <ul id="sessions" class="items"></ul>
       <button type="button" id="sign-out">Sign out on this device</button>
+    </section>
+
+    <section aria-labelledby="passkey-heading" id="passkey-section" hidden>
+      <h2 id="passkey-heading">Add a passkey</h2>
+      <p>Add another passkey for the owner, such as a phone or a security key. You confirm with a passkey you already have first, unless you did so in the last few minutes.</p>
+      <form id="passkey-form">
+        <label for="passkey-label">Device label <span class="hint">(optional)</span></label>
+        <input id="passkey-label" name="label" maxlength="64" autocomplete="off">
+        <button type="submit" id="passkey-add">Add a passkey</button>
+      </form>
     </section>
 
     <section aria-labelledby="invites-heading" id="invites-section" hidden>
@@ -41,6 +52,12 @@
       <h2 id="users-heading">All users</h2>
       <p>As the owner you can revoke any user's sessions and remove their passkeys. Your last passkey cannot be removed.</p>
       <div id="users"></div>
+    </section>
+
+    <section aria-labelledby="audit-heading" id="audit-section" hidden>
+      <h2 id="audit-heading">Recovery activity</h2>
+      <p>Uses of the recovery token, newest first: when, what, and the result. Nothing else is recorded.</p>
+      <ul id="audit" class="items"></ul>
     </section>
 
     <p id="sign-in-link" hidden><a href="/auth/login/">Sign in with a passkey</a></p>

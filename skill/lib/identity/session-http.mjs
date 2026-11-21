@@ -1,16 +1,27 @@
-// Per-device session cookies, request authentication, and the account API
-// under /auth/account (list and revoke sessions, owner administration of
-// users' sessions and passkeys, and invites). Transport-free: serve.mjs
-// supplies the stores, the allowed origins, and the CSRF derivation. See
-// docs/sessions.md and docs/invites.md.
+// Per-device session cookies, request authentication, the step-up gate, and
+// the account API under /auth/account (list and revoke sessions, owner
+// administration of users' sessions and passkeys, invites, and the recovery
+// audit log). Transport-free: serve.mjs supplies the stores, the allowed
+// origins, and the CSRF derivation. See docs/sessions.md, docs/invites.md,
+// and docs/recovery.md.
 import crypto from 'node:crypto';
 import { INVITE_ID_RE, InviteStoreError } from './invites.mjs';
 import { HttpError, parseJson, readBody, sendJson } from './passkey-http.mjs';
 import { fileSignature } from './private-file.mjs';
+import { RecoveryStoreError } from './recovery.mjs';
 import { SessionStoreError } from './sessions.mjs';
 import { IdentityStoreError, findCredential, findUser, isSafeDisplayName } from './store.mjs';
 
 export const SESSION_COOKIE = 'cockpit_session';
+// The session cookie name when every passkey origin is https. Browsers accept
+// a __Host- cookie only with Secure, Path=/, and no Domain, so it cannot be
+// set over plain http or by a sibling subdomain.
+export const HOST_SESSION_COOKIE = '__Host-cockpit_session';
+// How recently a session must have completed a passkey step-up before it may
+// add a passkey, create an invite, or (#13) change delegations.
+export const DEFAULT_STEP_UP_WINDOW_MS = 5 * 60 * 1000;
+export const MIN_STEP_UP_WINDOW_MS = 60 * 1000;
+export const MAX_STEP_UP_WINDOW_MS = 60 * 60 * 1000;
 export const ACCOUNT_PREFIX = '/auth/account';
 // The invite page. The token goes in the URL fragment, which browsers never
 // send to a server or put in a Referer.
@@ -41,15 +52,43 @@ export const parseCookies = (header) => {
 };
 
 /**
- * The Set-Cookie value for a new session: HttpOnly, SameSite=Strict, Path=/,
- * Max-Age equal to the session lifetime, and Secure on https.
+ * The session cookie name for a set of passkey origins: __Host-cockpit_session
+ * when every origin is https, else cockpit_session.
+ *
+ * @param {Iterable<string>} origins
  */
-export const sessionCookie = (token, { maxAgeSeconds, secure }) => (
-  `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}`
+export const sessionCookieName = (origins) => {
+  const list = [...origins];
+  return list.length > 0 && list.every((origin) => origin.startsWith('https:')) ? HOST_SESSION_COOKIE : SESSION_COOKIE;
+};
+
+/**
+ * The Set-Cookie value for a new session: HttpOnly, SameSite=Strict, Path=/,
+ * Max-Age equal to the session lifetime, and Secure on https (always for a
+ * __Host- name).
+ */
+export const sessionCookie = (token, { maxAgeSeconds, secure, name = SESSION_COOKIE }) => (
+  `${name}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${secure || name.startsWith('__Host-') ? '; Secure' : ''}`
 );
 
 /** A Set-Cookie value that deletes cookie `name`. */
-export const expiredCookie = (name, { secure }) => `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure ? '; Secure' : ''}`;
+export const expiredCookie = (name, { secure }) => `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure || name.startsWith('__Host-') ? '; Secure' : ''}`;
+
+/**
+ * The step-up gate. Throws 403 step_up_required unless the session completed
+ * a passkey step-up (a passkey sign-in counts) within the last `windowMs`.
+ * Applies to every session kind. Registration and invite creation use it now;
+ * delegation approve and revoke (#13) call it too. A step-up time in the
+ * future (a clock that went back, or an edited file) does not count.
+ *
+ * @param {{ session: { step_up_at: string | null } }} signedIn From createSessionAuth().fromRequest().
+ * @param {{ now: number, windowMs: number }} options
+ */
+export const requireFreshStepUp = (signedIn, { now, windowMs }) => {
+  const at = Date.parse(signedIn?.session?.step_up_at ?? '');
+  const elapsed = now - at;
+  if (!(elapsed >= 0 && elapsed <= windowMs)) throw new HttpError(403, 'step_up_required', 'Confirm with your passkey first.');
+};
 
 const BROWSERS = [[/Edg\//, 'Edge'], [/Firefox\//, 'Firefox'], [/Chrome\//, 'Chrome'], [/Safari\//, 'Safari']];
 const SYSTEMS = [[/iPhone|iPad/, 'iOS'], [/Android/, 'Android'], [/CrOS/, 'ChromeOS'], [/Macintosh|Mac OS X/, 'macOS'], [/Windows/, 'Windows'], [/Linux/, 'Linux']];
@@ -72,15 +111,21 @@ export const deviceLabel = ({ credentialLabel = '', userAgent = '' } = {}) => {
  *
  * fromRequest(req) returns { session, user } for a live session whose user
  * exists and is not disabled, and whose passkey (if it has one) is still on
- * that user, and null otherwise. Store errors fail closed
+ * that user, and null otherwise. A recovery session must belong to the owner
+ * and be no older than the current recovery token, so rotating the token ends
+ * recovery sessions even if revoking them failed. Store errors fail closed
  * (null) and are logged as a code only.
  *
  * @param {object} options
  * @param {ReturnType<import('./sessions.mjs').openSessionStore>} options.sessions
  * @param {import('./store.mjs').IdentityStore} options.identityStore
+ * @param {string} [options.cookieName] The only session cookie name read.
+ * @param {() => number | null} [options.recoveryNotBefore] Creation time (ms) of the current recovery token; throws to refuse every recovery session.
  * @param {(message: string) => void} [options.log]
  */
-export const createSessionAuth = ({ sessions, identityStore, log = () => {} }) => {
+export const createSessionAuth = ({
+  sessions, identityStore, cookieName = SESSION_COOKIE, recoveryNotBefore = () => null, log = () => {},
+}) => {
   // The identity document, re-read only when the file changes.
   let cache = { signature: undefined, data: null };
   const identity = () => {
@@ -100,7 +145,7 @@ export const createSessionAuth = ({ sessions, identityStore, log = () => {} }) =
   };
 
   const fromRequest = (req) => {
-    const token = parseCookies(req.headers.cookie).get(SESSION_COOKIE);
+    const token = parseCookies(req.headers.cookie).get(cookieName);
     if (!token) return null;
     try {
       const session = sessions.validate(token);
@@ -111,6 +156,11 @@ export const createSessionAuth = ({ sessions, identityStore, log = () => {} }) =
       // A session ends with its passkey, however the passkey was removed.
       // Sessions created without a passkey (credential_id null) are unaffected.
       if (session.credential_id !== null && !user.credentials.some((credential) => credential.id === session.credential_id)) return null;
+      if (session.kind === 'recovery') {
+        if (user.role !== 'owner') return null;
+        const notBefore = recoveryNotBefore();
+        if (notBefore !== null && Date.parse(session.created_at) < notBefore) return null;
+      }
       return { session, user };
     } catch (error) {
       log(`session check failed (${error?.code ?? error?.name})`);
@@ -133,7 +183,8 @@ const STORE_ERRORS = Object.freeze({
   too_many_invites: () => new HttpError(409, 'too_many_invites', 'There are too many pending invites; revoke one first.'),
 });
 
-const isStoreError = (error) => error instanceof SessionStoreError || error instanceof IdentityStoreError || error instanceof InviteStoreError;
+const isStoreError = (error) => error instanceof SessionStoreError || error instanceof IdentityStoreError || error instanceof InviteStoreError
+  || error instanceof RecoveryStoreError;
 
 const storeError = (error) => {
   if (isStoreError(error) && STORE_ERRORS[error.code]) return STORE_ERRORS[error.code]();
@@ -155,9 +206,15 @@ const safeEqual = (a, b) => {
  * @param {(principal: string, sessionId: string) => string} options.csrfToken Per-session CSRF token.
  * @param {(secure: boolean) => string[]} options.signOutCookies Set-Cookie values that sign this browser out.
  * @param {import('./invites.mjs').InviteStore} [options.invites] Invites store; without it the invite routes return 404.
+ * @param {{ list: () => { at: string, event: string, result: string }[] }} [options.audit] Recovery audit log; without it GET /audit returns 404.
+ * @param {number} [options.stepUpWindowMs] Step-up freshness window for invite creation.
+ * @param {() => number} [options.now] Clock for the step-up window (tests).
  * @param {(message: string) => void} [options.log]
  */
-export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins, csrfToken, signOutCookies, invites = null, log = () => {} }) => {
+export const createAccountApi = ({
+  auth, sessions, identityStore, allowedOrigins, csrfToken, signOutCookies, invites = null, audit = null,
+  stepUpWindowMs = DEFAULT_STEP_UP_WINDOW_MS, now = Date.now, log = () => {},
+}) => {
   const checkPost = (req) => {
     const origin = req.headers.origin;
     if (!origin || !new Set(allowedOrigins()).has(origin)) throw new HttpError(403, 'origin_denied', 'Origin not allowed.');
@@ -215,8 +272,10 @@ export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins
         }
       },
       // The one response that carries an invite token, inside the link.
-      POST: (req) => mutation(req, ({ user, body, origin }) => {
+      // Creating an invite needs a fresh passkey step-up, from any session kind.
+      POST: (req) => mutation(req, ({ session, user, body, origin }) => {
         requireOwner({ user });
+        requireFreshStepUp({ session }, { now: now(), windowMs: stepUpWindowMs });
         if (!isSafeDisplayName(body.display_name)) {
           throw new HttpError(400, 'invalid_request', 'display_name must be 1 to 128 characters without surrounding whitespace, control, or formatting characters.');
         }
@@ -234,8 +293,20 @@ export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins
     },
   } : {};
 
+  // Recovery activity for the owner: time, event, and result only.
+  const auditRoutes = audit ? {
+    '/audit': {
+      GET: (req) => {
+        checkGet(req);
+        requireOwner(requireSession(req));
+        return { status: 200, body: { events: audit.list() } };
+      },
+    },
+  } : {};
+
   const routes = {
     ...inviteRoutes,
+    ...auditRoutes,
     '': {
       GET: (req) => {
         checkGet(req);

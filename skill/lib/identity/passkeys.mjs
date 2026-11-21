@@ -17,6 +17,10 @@
 // - An unknown credential id is verified against a dummy key of the
 //   response's algorithm family before it is refused, so a failed sign-in
 //   costs about the same whether or not the id is registered.
+// - Step-up is a fresh user-verified assertion from one of the owner's
+//   passkeys by an already signed-in owner session (docs/recovery.md). The
+//   challenge is bound to that session and user, so it cannot be finished by
+//   another session; the caller records the step-up on the session.
 import crypto from 'node:crypto';
 import { createChallengeStore } from './challenges.mjs';
 import { IdentityStoreError, findCredential, isSafeLabel } from './store.mjs';
@@ -113,11 +117,20 @@ export const createPasskeyCeremonies = ({
     excludeCredentials: exclude.map((credential) => ({ type: 'public-key', id: credential.id, transports: credential.transports })),
   });
 
-  const startRegistration = ({ displayName } = {}) => {
+  /**
+   * Start a registration. With `sessionId` (and the owner's `userId`), it adds
+   * a passkey to the owner and the challenge is bound to that session. With
+   * `firstOwner`, it creates the owner and refuses if one exists. With
+   * neither, it does whichever applies (library use; the HTTP routes always
+   * pass one).
+   */
+  const startRegistration = ({ displayName, userId, sessionId, firstOwner = false } = {}) => {
     const data = loadOrNull(store);
     const owner = data?.users.find((user) => user.role === 'owner');
+    if (sessionId !== undefined && (!owner || owner.id !== userId)) throw new PasskeyError('not_owner', 'Only the owner can add a passkey.');
+    if (firstOwner && owner) throw new PasskeyError('owner_exists', 'The owner already exists.');
     const binding = owner
-      ? { userId: owner.id, displayName: owner.display_name, createOwner: false }
+      ? { userId: owner.id, displayName: owner.display_name, createOwner: false, ...(sessionId !== undefined ? { sessionId } : {}) }
       : { userId: `usr_${crypto.randomBytes(16).toString('base64url')}`, displayName: checkDisplayName(displayName), createOwner: true };
     const issued = challenges.issue({ ceremony: 'registration', binding });
     return { challengeId: issued.id, publicKey: creationOptions(binding, issued, owner?.credentials ?? []) };
@@ -137,8 +150,16 @@ export const createPasskeyCeremonies = ({
     };
   };
 
-  const finishRegistration = ({ challengeId, response, label = '' } = {}) => {
+  /**
+   * Finish a registration. With `sessionId`, the challenge must have been
+   * issued to that session; with `firstOwner`, it must have been issued to
+   * create the owner. So a challenge cannot move between sessions, or between
+   * a session and the recovery-token setup.
+   */
+  const finishRegistration = ({ challengeId, response, label = '', sessionId, firstOwner = false } = {}) => {
     const { challenge, binding } = challenges.consume(challengeId, 'registration');
+    const wrongBinding = sessionId !== undefined ? binding.sessionId !== sessionId : firstOwner && (!binding.createOwner || binding.sessionId !== undefined);
+    if (wrongBinding) throw new PasskeyError('wrong_session', 'The registration was started by another session.');
     const input = verifiedCredential(response, challenge, label);
     // The owner and their first passkey are written together, so a failed
     // first registration leaves no store behind.
@@ -272,7 +293,63 @@ export const createPasskeyCeremonies = ({
     });
   };
 
+  const ownerOf = (data, userId) => {
+    const owner = data?.users.find((user) => user.role === 'owner');
+    if (!owner || owner.id !== userId || owner.disabled) throw new PasskeyError('not_owner', 'Only the owner can step up.');
+    return owner;
+  };
+
+  /**
+   * Start a step-up for the owner's session `sessionId`. The options list the
+   * owner's passkeys and require user verification.
+   */
+  const startStepUp = ({ userId, sessionId } = {}) => {
+    if (typeof sessionId !== 'string' || sessionId === '') throw new PasskeyError('session_required', 'A session is required.');
+    const owner = ownerOf(loadOrNull(store), userId);
+    if (owner.credentials.length === 0) throw new PasskeyError('no_passkey', 'The owner has no passkey.');
+    const issued = challenges.issue({ ceremony: 'step-up', binding: { userId, sessionId } });
+    return {
+      challengeId: issued.id,
+      publicKey: {
+        challenge: issued.challenge.toString('base64url'),
+        rpId,
+        timeout: challenges.ttlMs,
+        userVerification: 'required',
+        allowCredentials: owner.credentials.map((credential) => ({ type: 'public-key', id: credential.id, transports: credential.transports })),
+      },
+    };
+  };
+
+  /**
+   * Finish a step-up: the challenge must have been issued to this session and
+   * user, and the assertion must come from one of the owner's passkeys with
+   * user verification. Stores the new signature counter. Every failure
+   * throws; network-facing callers map them all to one error.
+   *
+   * @returns {Readonly<{ userId: string, credentialId: string, counter: number }>}
+   */
+  const finishStepUp = ({ challengeId, response, userId, sessionId } = {}) => {
+    const { challenge, binding } = challenges.consume(challengeId, 'step-up');
+    if (binding.sessionId !== sessionId || binding.userId !== userId) throw new PasskeyError('wrong_session', 'The step-up was started by another session.');
+    const rawId = response?.rawId;
+    if (typeof rawId !== 'string' || !CREDENTIAL_ID_RE.test(rawId)) throw new WebAuthnError('malformed_response');
+    const owner = ownerOf(loadOrNull(store), userId);
+    const credential = owner.credentials.find((item) => item.id === rawId);
+    if (!credential) throw new PasskeyError('unknown_credential', 'No such credential.');
+    const rp = relyingParty();
+    const verified = verify({
+      response,
+      expectedChallenge: challenge,
+      rpId: rp.rpId,
+      origins: [...rp.origins],
+      credential: { id: credential.id, publicKey: credential.public_key, counter: credential.counter },
+      expectedUserHandle: Buffer.from(owner.id, 'utf8'),
+    });
+    if (verified.counter !== 0 || credential.counter !== 0) store.updateCounter(credential.id, verified.counter);
+    return Object.freeze({ userId: owner.id, credentialId: credential.id, counter: verified.counter });
+  };
+
   return Object.freeze({
-    startRegistration, finishRegistration, startInvitation, finishInvitation, startAuthentication, finishAuthentication,
+    startRegistration, finishRegistration, startInvitation, finishInvitation, startAuthentication, finishAuthentication, startStepUp, finishStepUp,
   });
 };

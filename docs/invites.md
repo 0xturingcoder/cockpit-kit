@@ -6,7 +6,7 @@ Phase 1 of passkeys and identity, after [passkey sign-in](passkeys.md) and [per-
 
 | | |
 | --- | --- |
-| Who creates | Only the owner, from a live passkey session, through the account API (or the settings page). The server-token cookie and member sessions are refused. |
+| Who creates | Only the owner, from a live session (passkey or [recovery](recovery.md)) with a fresh passkey step-up, through the account API (or the settings page). The server-token cookie and member sessions are refused. |
 | Link | `<origin>/auth/invite/#<token>`. The token is 32 random bytes (`crypto.randomBytes`), base64url, in the URL fragment. |
 | Stored | SHA-256 of the token, never the token itself, plus a public invite id, the new member's user id and display name, the role (always `member`), who created it, and when it expires. |
 | Shown | The token appears once, in the create response. Listing never shows it or its hash. |
@@ -19,7 +19,7 @@ Phase 1 of passkeys and identity, after [passkey sign-in](passkeys.md) and [per-
 ## Quick start
 
 1. Sign in as the owner with a passkey and open `/auth/settings/`.
-2. Under **Invites**, enter the person's name and choose **Create invite link**. The link is shown once: copy it and send it to them privately.
+2. Under **Invites**, enter the person's name and choose **Create invite link**. If you signed in more than `--step-up-window` ago (default 5 minutes), or with the recovery token, the page first asks you to confirm with a passkey. The link is shown once: copy it and send it to them privately.
 3. They open the link, choose **Create a passkey**, and complete the browser's passkey prompt. They are then signed in and taken to `/`. Later they sign in at `/auth/login/` like any member.
 
 Pending invites are listed under **Invites** with a **Revoke invite** button each. An invite that is not used before it expires simply stops working.
@@ -45,7 +45,7 @@ send url privately  ────────────────────
 
 ### Creating an invite
 
-`POST /auth/account/invites` with `{ "display_name": "Test Member" }`. The display name follows the identity store's rules (1 to 128 characters, no surrounding whitespace, no control, bidirectional, or invisible formatting characters); anything else is `400 invalid_request`. The server pre-generates the member's user id (`usr_` plus 16 random bytes) and returns:
+`POST /auth/account/invites` with `{ "display_name": "Test Member" }`, from an owner session with a fresh passkey step-up ([recovery.md, Step-up](recovery.md#step-up)); without one the response is `403 step_up_required`. The display name follows the identity store's rules (1 to 128 characters, no surrounding whitespace, no control, bidirectional, or invisible formatting characters); anything else is `400 invalid_request`. The server pre-generates the member's user id (`usr_` plus 16 random bytes) and returns:
 
 ```json
 {
@@ -108,7 +108,7 @@ Account API (under `/auth/account`, owner only, with the account API's checks: a
 | Route | Behavior |
 | --- | --- |
 | `GET /auth/account/invites` | `{ invites: [{ id, user_id, display_name, role, created_by, created_at, expires_at }] }`: pending invites. No tokens or hashes. |
-| `POST /auth/account/invites` `{ display_name }` | `201 { invite, url }`. |
+| `POST /auth/account/invites` `{ display_name }` | `201 { invite, url }`. Needs a fresh passkey step-up (`403 step_up_required`). |
 | `POST /auth/account/invites/revoke` `{ invite_id }` | `{ revoked: true }` for a pending invite or one an enrollment has claimed; `404 invite_not_found` for an unknown, spent, or expired invite. |
 
 Enrollment (under `/auth/passkey`, with the passkey API's checks: `POST`, exact `Origin`, `Sec-Fetch-Site: same-origin` when present, JSON bodies of at most 64 KiB, no query string; see [passkeys.md, Requests](passkeys.md#requests)):
@@ -128,6 +128,7 @@ Page: `GET /auth/invite/` (and its script `/auth/invite/cockpit-invite.js`), ser
 | 400 | `invalid_request` | Enrollment: the body is not a JSON object, `challenge_id` or `credential` is missing, or `label` breaks the label rules. Account API: a bad `display_name` or `invite_id`. |
 | 401 | `session_required` | Account API without a live session, including the server-token cookie alone. |
 | 403 | `forbidden` / `csrf_invalid` / `origin_denied` | A member calling the invite routes; a missing or wrong CSRF token; wrong `Origin` or fetch metadata. |
+| 403 | `step_up_required` | Creating an invite without a fresh passkey step-up. |
 | 404 | `invite_not_found` | Revoking an invite that is neither pending nor claimed. |
 | 409 | `too_many_invites` | Creating a 33rd pending invite. Revoke one first. |
 | 429 | `rate_limited` | The invite options or failures bucket is empty (`Retry-After`). |
@@ -205,12 +206,12 @@ The ceremonies are `startInvitation({ token })` and `finishInvitation({ token, c
 
 - **Adding a device for an existing member.** Each invite creates a new member with one passkey. Members cannot add more passkeys through the server yet.
 - **Enabling or removing users.** Disabling is unchanged; there is no enable, removal, or ownership transfer.
-- **Step-up for the owner.** Creating an invite needs a live owner passkey session but no fresh passkey check; owner recovery and step-up for sensitive actions such as this one are #11.
 - **Per-client rate limits** (#21) and **async store writes** (#20).
 - **The standalone `intents-service.mjs`** has no sign-in surface and is unchanged.
 
 ## Tests
 
 - `test/invites.test.mjs`: the store, including hashing, single use, expiry with an injected clock, pruning, the pending cap, revocation, claims (hidden from find, list, and spend; complete; restore; the claim lease; revoke winning over restore, also from another process), fail-closed loading, file safety, and two processes spending one invite at once.
-- `test/invite-serve.test.mjs`: `serve.mjs` end to end with synthetic credentials generated at runtime: owner-only creation, enrollment of the bound member, single use, expiry, revocation (including mid-enrollment), wrong user, replay of the verify body and of the token, concurrent enrollments with exactly one winner, one byte-identical error for every invalid case, member and server-token callers refused, the retry paths (`503 store_busy` and `507 store_full`), revoking a claimed invite and a revoke from another process during a failed enrollment, the invite page headers and script, the token absent from every response except create and from log lines and the CLI's stderr, separate rate-limit buckets (bad option tokens draining the bucket that limits verify) and challenge capacity, and `--invite-lifetime` parsing.
+- `test/invite-serve.test.mjs`: `serve.mjs` end to end with synthetic credentials generated at runtime: owner-only creation (stepping up when the test clock makes the session's step-up stale), enrollment of the bound member, single use, expiry, revocation (including mid-enrollment), wrong user, replay of the verify body and of the token, concurrent enrollments with exactly one winner, one byte-identical error for every invalid case, member and server-token callers refused, the retry paths (`503 store_busy` and `507 store_full`), revoking a claimed invite and a revoke from another process during a failed enrollment, the invite page headers and script, the token absent from every response except create and from log lines and the CLI's stderr, separate rate-limit buckets (bad option tokens draining the bucket that limits verify) and challenge capacity, and `--invite-lifetime` parsing.
+- `test/recovery-serve.test.mjs`: invite creation refused without a step-up, with a stale one, and allowed with a fresh one, from passkey and recovery sessions.
 - `test/invite-page.test.mjs`: the invite page script and the settings page's invite link run in `node:vm` with stubbed browser APIs: the fragment is stripped before the first request, the token appears in no URL or navigation and only in POST bodies, storage, cookies, and the console are untouched, and a shown invite link is cleared on `pagehide`.

@@ -9,6 +9,8 @@ import { expandHome } from './paths.mjs';
 import { normalizeRelyingParty } from './identity/webauthn.mjs';
 import { DEFAULT_SESSION_LIFETIME_MS, MAX_SESSION_LIFETIME_MS, MIN_SESSION_LIFETIME_MS, SESSIONS_FILE } from './identity/sessions.mjs';
 import { DEFAULT_INVITE_LIFETIME_MS, INVITES_FILE, MAX_INVITE_LIFETIME_MS, MIN_INVITE_LIFETIME_MS } from './identity/invites.mjs';
+import { AUDIT_FILE, RECOVERY_FILE } from './identity/recovery.mjs';
+import { DEFAULT_STEP_UP_WINDOW_MS, MAX_STEP_UP_WINDOW_MS, MIN_STEP_UP_WINDOW_MS } from './identity/session-http.mjs';
 
 export const DEFAULT_SERVE_HOST = '127.0.0.1';
 export const DEFAULT_SERVE_PORT = 18765;
@@ -75,13 +77,35 @@ export function parseInviteLifetime(value, source = '--invite-lifetime') {
   return parseDuration(value, { source, min: MIN_INVITE_LIFETIME_MS, max: MAX_INVITE_LIFETIME_MS, range: '5m to 7d', examples: '24h, 3d, or 30m' });
 }
 
+export function parseStepUpWindow(value, source = '--step-up-window') {
+  return parseDuration(value, { source, min: MIN_STEP_UP_WINDOW_MS, max: MAX_STEP_UP_WINDOW_MS, range: '1m to 60m', examples: '5m, 15m, or 1h' });
+}
+
 function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
+  if (flags.printTokenToNonTty && !flags.rotateToken) throw new ArgumentError('--print-token-to-non-tty requires --rotate-token');
   if (!flags.passkeys) {
     if (flags.rpId !== undefined) throw new ArgumentError('--rp-id requires --passkeys');
     if (flags.sessionLifetime !== undefined) throw new ArgumentError('--session-lifetime requires --passkeys');
     if (flags.inviteLifetime !== undefined) throw new ArgumentError('--invite-lifetime requires --passkeys');
-    return { passkeys: false, rpId: null, sessionStore: null, sessionLifetimeMs: null, inviteStore: null, inviteLifetimeMs: null };
+    if (flags.stepUpWindow !== undefined) throw new ArgumentError('--step-up-window requires --passkeys');
+    if (flags.rotateToken) throw new ArgumentError('--rotate-token requires --passkeys');
+    if (flags.recoveryEnroll) throw new ArgumentError('--recovery-enroll requires --passkeys');
+    return {
+      passkeys: false,
+      rpId: null,
+      sessionStore: null,
+      sessionLifetimeMs: null,
+      inviteStore: null,
+      inviteLifetimeMs: null,
+      recoveryStore: null,
+      auditStore: null,
+      stepUpWindowMs: null,
+      rotateToken: false,
+      printTokenToNonTty: false,
+      recoveryEnroll: false,
+    };
   }
+  if (flags.rotateToken && flags.recoveryEnroll) throw new ArgumentError('--rotate-token runs once and exits; it cannot be combined with --recovery-enroll');
   if (!auth) throw new ArgumentError('serve --passkeys requires authentication; --passkeys --no-auth is not supported');
   if (!identityStore) throw new ArgumentError('serve --passkeys needs an identity store: pass --identity-store <path> or set HOME or XDG_STATE_HOME');
   if (flags.identityStore === undefined && flags.fileIdentityStore) {
@@ -94,17 +118,31 @@ function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
   } catch {
     throw new ArgumentError(`--rp-id must be a lowercase domain name with at least two labels, or localhost (not an IP address), and every passkey origin must be https://<rp-id or a subdomain>[:port], or http://localhost[:port] with --rp-id localhost${origins.length ? '' : '; pass --origin for a non-localhost --rp-id'}`);
   }
-  // Sessions and invites live next to the identity store, so they share its
-  // directory checks; the identity store path is already known to be outside
-  // the root.
-  const sessionStore = path.join(path.dirname(identityStore), SESSIONS_FILE);
-  const inviteStore = path.join(path.dirname(identityStore), INVITES_FILE);
-  for (const [file, name, what] of [[sessionStore, SESSIONS_FILE, 'sessions'], [inviteStore, INVITES_FILE, 'invites']]) {
+  // Sessions, invites, the recovery token, and the audit log live next to the
+  // identity store, so they share its directory checks; the identity store
+  // path is already known to be outside the root.
+  const sibling = (name) => path.join(path.dirname(identityStore), name);
+  const [sessionStore, inviteStore, recoveryStore, auditStore] = [SESSIONS_FILE, INVITES_FILE, RECOVERY_FILE, AUDIT_FILE].map(sibling);
+  for (const [file, name, what] of [[sessionStore, SESSIONS_FILE, 'sessions'], [inviteStore, INVITES_FILE, 'invites'], [recoveryStore, RECOVERY_FILE, 'recovery token'], [auditStore, AUDIT_FILE, 'audit log']]) {
     if (file === identityStore) throw new ArgumentError(`--identity-store must not be named ${name}; that name is used for the ${what} file next to it`);
   }
   const sessionLifetimeMs = flags.sessionLifetime === undefined ? DEFAULT_SESSION_LIFETIME_MS : parseSessionLifetime(flags.sessionLifetime);
   const inviteLifetimeMs = flags.inviteLifetime === undefined ? DEFAULT_INVITE_LIFETIME_MS : parseInviteLifetime(flags.inviteLifetime);
-  return { passkeys: true, rpId, sessionStore, sessionLifetimeMs, inviteStore, inviteLifetimeMs };
+  const stepUpWindowMs = flags.stepUpWindow === undefined ? DEFAULT_STEP_UP_WINDOW_MS : parseStepUpWindow(flags.stepUpWindow);
+  return {
+    passkeys: true,
+    rpId,
+    sessionStore,
+    sessionLifetimeMs,
+    inviteStore,
+    inviteLifetimeMs,
+    recoveryStore,
+    auditStore,
+    stepUpWindowMs,
+    rotateToken: flags.rotateToken === true,
+    printTokenToNonTty: flags.printTokenToNonTty === true,
+    recoveryEnroll: flags.recoveryEnroll === true,
+  };
 }
 
 export function parseOrigin(value, source = '--origin') {
@@ -142,6 +180,13 @@ function parseArgs(argv) {
       flags.inviteLifetime = takeValue(argv, index, arg);
       index += 1;
     } else if (arg.startsWith('--invite-lifetime=')) flags.inviteLifetime = arg.slice('--invite-lifetime='.length);
+    else if (arg === '--step-up-window') {
+      flags.stepUpWindow = takeValue(argv, index, arg);
+      index += 1;
+    } else if (arg.startsWith('--step-up-window=')) flags.stepUpWindow = arg.slice('--step-up-window='.length);
+    else if (arg === '--rotate-token') flags.rotateToken = true;
+    else if (arg === '--print-token-to-non-tty') flags.printTokenToNonTty = true;
+    else if (arg === '--recovery-enroll') flags.recoveryEnroll = true;
     else if (arg === '--origin') {
       flags.origins = [...(flags.origins ?? []), parseOrigin(takeValue(argv, index, arg), '--origin')];
       index += 1;

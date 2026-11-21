@@ -2,7 +2,9 @@
 
 Phase 1 of passkeys and identity, after the [users and credentials store](identity-store.md). `serve.mjs --passkeys` adds passkey registration and sign-in and a small login page. Verification is built on `node:crypto` with no dependencies, and it supports a deliberately narrow subset of WebAuthn.
 
-A successful sign-in produces a verified user id, and `serve.mjs` creates a new per-device session for that user, owner or member, with its own `cockpit_session` cookie. Sessions, their lifetime, listing and revoking them, the settings page, and which routes accept them are described in [`sessions.md`](sessions.md). Members get their first passkey through one-time invite links from the owner, described in [`invites.md`](invites.md).
+A successful sign-in produces a verified user id, and `serve.mjs` creates a new per-device session for that user, owner or member, with its own `cockpit_session` cookie. Sessions, their lifetime, listing and revoking them, the settings page, and which routes accept them are described in [`sessions.md`](sessions.md). Members get their first passkey through one-time invite links from the owner, described in [`invites.md`](invites.md). The owner's recovery token, recovery sessions, and the passkey step-up that adding a passkey or creating an invite requires are described in [`recovery.md`](recovery.md).
+
+With `--passkeys`, the per-start server token authenticates nothing: the `?token=` URL and the `cockpit_serve` cookie are ignored and the token is not printed. Without `--passkeys` they work as before.
 
 ## Quick start
 
@@ -10,18 +12,20 @@ A successful sign-in produces a verified user id, and `serve.mjs` creates a new 
 node skill/scripts/serve.mjs --root /path/to/knowledge-repo --passkeys
 ```
 
-The server prints three extra lines:
+The server prints two extra lines, and on the first start in a terminal, the owner's recovery token once:
 
 ```text
 Passkeys: sign in at http://localhost:18765/auth/login/ (relying party localhost)
-Add a passkey: http://localhost:18765/auth/login/?token=<token>
 Devices, invites, and sign out: http://localhost:18765/auth/settings/
+Recovery token (create the owner, or recover, at http://localhost:18765/auth/login/): <token>
+Store it offline (a password manager or paper), never in the repo, shell history, or chat. It is not shown again.
 ```
 
-1. Open the "Add a passkey" URL. The token sets the server-token cookie and redirects to the login page.
-2. Enter your name (only used to create the owner, when the identity store does not exist yet), optionally a device label, and choose **Add a passkey**.
-3. Later, from any browser that has the passkey, open `/auth/login/` and choose **Sign in with a passkey**. Each sign-in is a separate session; manage them at `/auth/settings/`.
+1. Store the recovery token offline ([`recovery.md`](recovery.md#keeping-the-token-offline)). If the first start was not in a terminal, run `serve.mjs --passkeys --rotate-token` in one to create it.
+2. Open `/auth/login/`. Under **Create the owner**, enter your name, optionally a device label, and the recovery token, and choose **Create the owner**. This works only while there is no owner.
+3. Later, from any browser that has the passkey, open `/auth/login/` and choose **Sign in with a passkey**. Each sign-in is a separate session; manage them at `/auth/settings/`, where the owner can also **Add a passkey** for another device.
 4. To let someone else sign in, create an invite under **Invites** on `/auth/settings/` and send them the link ([`invites.md`](invites.md)).
+5. Without a passkey at hand, sign in with **Recover with the server token** ([`recovery.md`](recovery.md#recovering)).
 
 Use `localhost`, not `127.0.0.1`: browsers do not allow an IP address as a relying-party id, so passkeys created on `localhost` work only on `localhost` origins.
 
@@ -36,6 +40,10 @@ All passkey settings come from the command line. None are read from `.cockpit/se
 | `--origin <origin>` | Exact browser origin, repeatable. Shared with `--write`. Without it, the only passkey origin is `http://localhost:<port>`. Each origin must use `https` (or `http` with the host `localhost`), and its host must be the rp id or a subdomain of it. |
 | `--session-lifetime <duration>` | Lifetime of a sign-in session, such as `90d`, `12h`, or `30m` (default `90d`, from `5m` to `400d`). Requires `--passkeys`. See [`sessions.md`](sessions.md). |
 | `--invite-lifetime <duration>` | How long a member invite link stays valid, such as `24h`, `3d`, or `30m` (default `24h`, from `5m` to `7d`). Requires `--passkeys`. See [`invites.md`](invites.md). |
+| `--step-up-window <duration>` | How long a passkey step-up stays fresh for adding a passkey or creating an invite (default `5m`, from `1m` to `60m`). Requires `--passkeys`. See [`recovery.md`](recovery.md#step-up). |
+| `--rotate-token` | Replace the owner's recovery token, end every recovery session, print the new token once, and exit without serving. Refused (`non_tty_stdout`) when stdout is not a terminal. Requires `--passkeys`. See [`recovery.md`](recovery.md#rotation). |
+| `--print-token-to-non-tty` | With `--rotate-token`, print the new token even when stdout is not a terminal. Use it only when nothing keeps that output. |
+| `--recovery-enroll` | For this run only, let a recovery session add one owner passkey without a step-up, for 15 minutes or one use (when every owner passkey is lost). Requires `--passkeys`. See [`recovery.md`](recovery.md#lost-every-passkey). |
 | `--identity-store <path>` | The users and credentials file. With `--passkeys` it must come from this flag or the default state directory; `identity_store` in `.cockpit/serve.toml` is refused. If no store path can be resolved (no `HOME` or `XDG_STATE_HOME`), `--passkeys` refuses to start. |
 
 Mismatches fail at startup. The relying-party id and origins are never taken from `Host`, `Origin`, `X-Forwarded-*`, or any other request header; the request `Origin` is only compared against the configured list.
@@ -47,23 +55,25 @@ node skill/scripts/serve.mjs --root /path/to/knowledge-repo --passkeys \
   --rp-id example.com --origin https://cockpit.example.com
 ```
 
-The proxy must still present a loopback `Host` header, as for any `serve.mjs` request. On an `https` origin the session cookie gets the `Secure` attribute. The server-token cookie set by the tokenized URL gets it too when every configured `--origin` is `https`.
+The proxy must still present a loopback `Host` header, as for any `serve.mjs` request. On an `https` origin the session cookie gets the `Secure` attribute, and when every passkey origin is `https` it is named `__Host-cockpit_session` ([`sessions.md`](sessions.md#summary)).
 
 ## Ceremonies
 
 ### Registration (owner only)
 
-Registration needs the server-token cookie (from the tokenized URL); a passkey session alone cannot add a passkey. If the identity store does not exist yet, the first registration creates the owner, writing the owner and the passkey in one store write so a failed first registration leaves no store behind; after that, registration adds a passkey to the owner. Members get passkeys through invites (below).
+Registration adds a passkey to the owner and needs a live **owner** session (passkey or recovery), that session's CSRF token in `X-Cockpit-CSRF`, and a fresh passkey step-up ([`recovery.md`](recovery.md#step-up); a passkey sign-in counts as one for `--step-up-window`). The step-up is checked again at verify. A member session gets `403 forbidden`, even with a recovery token in the body or a leftover `cockpit_serve` cookie: a live session always wins. The challenge is bound to the session that requested it.
 
-1. `POST /auth/passkey/register/options` with `{ "display_name"?: string }`. Returns `{ challenge_id, publicKey }`, where `publicKey` is `PublicKeyCredentialCreationOptions` with base64url binary fields: `rp`, `user` (the user handle is the UTF-8 user id), `challenge`, `pubKeyCredParams` (-7, then -257), `timeout`, `attestation: "none"`, `authenticatorSelection` (`residentKey: "required"`, `userVerification: "required"`), and `excludeCredentials` (the owner's existing passkeys).
+The one path without a session creates the first owner: while the identity store has no owner, send `recovery_token` (the owner's [recovery token](recovery.md)) in both the options and the verify bodies. It writes the owner and the passkey in one store write, so a failed first registration leaves no store behind. Once an owner exists, the recovery token alone gets `409 owner_exists`. Members get passkeys through invites (below).
+
+1. `POST /auth/passkey/register/options` with `{ "display_name"?: string, "recovery_token"?: string }` (both only for the first owner). Returns `{ challenge_id, publicKey }`, where `publicKey` is `PublicKeyCredentialCreationOptions` with base64url binary fields: `rp`, `user` (the user handle is the UTF-8 user id), `challenge`, `pubKeyCredParams` (-7, then -257), `timeout`, `attestation: "none"`, `authenticatorSelection` (`residentKey: "required"`, `userVerification: "required"`), and `excludeCredentials` (the owner's existing passkeys).
 2. The page calls `navigator.credentials.create()`.
-3. `POST /auth/passkey/register/verify` with `{ challenge_id, credential, label?: string }`. `credential` is the `PublicKeyCredential` as JSON (base64url fields, as `toJSON()` produces). Returns `201 { registered: true, user_id, credential_id, created_owner }`.
+3. `POST /auth/passkey/register/verify` with `{ challenge_id, credential, label?: string, recovery_token?: string }`. `credential` is the `PublicKeyCredential` as JSON (base64url fields, as `toJSON()` produces). Returns `201 { registered: true, user_id, credential_id, created_owner }`.
 
-The challenge is bound to the user it was issued for, so the response can only add a credential to that user. Note that with `none` attestation nothing in the registration response is signed; registration is trusted because the server token authorized it, not because of the response.
+The challenge is bound to the user and the session (or first-owner setup) it was issued for, so the response can only add a credential to that user, from that session. Note that with `none` attestation nothing in the registration response is signed; registration is trusted because a stepped-up owner session (or, for the first owner, the recovery token) authorized it, not because of the response.
 
 ### Invite enrollment (new members)
 
-Members get their first passkey through a one-time invite link that the owner creates from a signed-in session. No server token is involved: the invite token, sent in the request body, authorizes exactly one registration for the user the invite names.
+Members get their first passkey through a one-time invite link that the owner creates from a signed-in session. No session or recovery token is involved: the invite token, sent in the request body, authorizes exactly one registration for the user the invite names.
 
 1. `POST /auth/passkey/invite/options` with `{ token }`. Returns `{ challenge_id, publicKey }` with the same creation options as registration, for the invite's pre-generated user, and an empty `excludeCredentials`.
 2. The invite page calls `navigator.credentials.create()`.
@@ -102,18 +112,20 @@ Every passkey request must be a `POST` with `Content-Type: application/json`, a 
 - 32 random bytes from `crypto.randomBytes`, with a separate random 32-byte handle (`challenge_id`) that the client sends back.
 - Single use: the first `consume()` removes the challenge before any check, so a failed attempt uses it up too.
 - Short TTL: 2 minutes. The same value is sent as the ceremony `timeout`.
-- Bound to the ceremony (`registration`, `authentication`, or `invitation`) and, for registration and invitations, to the user (and the invite).
-- Bounded per ceremony: at most 64 pending sign-in challenges, 64 pending registration challenges, and 64 pending invitation challenges, each counted separately. When a ceremony is full, its new options requests get `503 too_many_challenges` instead of evicting a live ceremony. Because the limits are separate, anonymous sign-in or invite requests cannot use up the slots that operator registration needs.
+- Bound to the ceremony (`registration`, `authentication`, `invitation`, or `step-up`) and, for registration, invitations, and step-ups, to the user (and the session or invite).
+- Bounded per ceremony: at most 64 pending challenges for each of sign-in, registration, invitation, and step-up, each counted separately. When a ceremony is full, its new options requests get `503 too_many_challenges` instead of evicting a live ceremony. Because the limits are separate, anonymous sign-in or invite requests cannot use up the slots that owner registration and step-up need.
 - A server restart drops every pending ceremony.
 
 ## Rate limits
 
-Token buckets shared by all clients (a loopback server behind a proxy cannot tell clients apart without trusting forwarded headers). Sign-in, registration, and invite enrollment each have their own pair:
+Token buckets shared by all clients (a loopback server behind a proxy cannot tell clients apart without trusting forwarded headers). Sign-in, registration, invite enrollment, and step-up each have their own pair:
 
 - Options requests: 10 at once, refilling at 30 per minute.
 - Failed verifications: 10 at once, refilling at 10 per minute. While empty, every verify request for that ceremony gets `429 rate_limited` with `Retry-After`. For invites, an options request with a token that names no pending invite also counts as a failure, and an empty failures bucket refuses invite options too.
 
-Because the sign-in buckets are shared, someone who can reach the server can keep passkey sign-in rate limited. The tokenized URL still works as a fallback, and operator registration is unaffected because it draws on its own buckets.
+Recovery-token attempts (sign-in and first-owner setup) share one more bucket: 5 at once, refilling at 5 per minute, and every attempt takes a token ([`recovery.md`](recovery.md#summary)).
+
+Because the sign-in buckets are shared, someone who can reach the server can keep passkey sign-in rate limited. Owner registration and step-up are unaffected because they draw on their own buckets; per-client limits are #21.
 
 ## Errors
 
@@ -129,20 +141,25 @@ Every error response is `{ "error": { "code", "message" } }` with a fixed messag
 
 Timing: an unknown credential id is not refused early. The server runs the full verification against a dummy public key of the same algorithm family (ES256, or RS256 when the signature has RSA length), generated at startup with its private half discarded, and then refuses with the same generic error. A disabled user is refused only after the real verification. So a failed sign-in does the same parsing and one signature verification whether or not the credential id is registered. Residual differences: the dummy RSA key is 2048-bit, so a registered 3072- or 4096-bit RSA key verifies a little more slowly, and a successful verification is followed by a counter write. Credential ids are random values chosen by authenticators, so even a measurable difference would not reveal users.
 
-**Registration** is operator-only, so it returns the specific reason:
+**Registration** is owner-only, so it returns the specific reason:
 
 | Status | Code | When |
 | --- | --- | --- |
 | 400 | verifier code (table below), `challenge_unknown`, `challenge_expired`, `wrong_ceremony` | The response or challenge was refused. |
 | 400 | `invalid_argument` | A bad `display_name` or `label` (the message names the field and rule, never the value). |
-| 401 | `authentication_required` | No server-token cookie. |
+| 400 | `wrong_session` | The challenge was issued to another session, or to first-owner setup. |
+| 401 | `authentication_required` / `recovery_failed` | No session and no recovery token; a wrong recovery token (first owner). |
+| 403 | `forbidden` / `csrf_invalid` / `step_up_required` | A member session; a missing or wrong CSRF token; no fresh passkey step-up. |
 | 403 | `user_disabled` | The target user is disabled. |
+| 409 | `owner_exists` | The recovery token was used to create an owner that already exists. |
 | 409 | `credential_exists` | That credential is already registered. |
 | 409 | `owner_conflict` / `user_missing` | The store changed during the ceremony; start again. |
 | 503 | `store_busy` | The store lock was busy; retry (`Retry-After: 2`). |
 | 507 | `store_full` | The store would exceed 1 MiB; remove unused passkeys. |
 
 **Invite enrollment** (`/auth/passkey/invite/*`) returns one `400 invite_invalid` for a spent, expired, revoked, unknown, malformed, or mismatched token and for any challenge or verifier failure; only `429 rate_limited`, `503 store_busy`, `503 too_many_challenges`, and `507 store_full` differ. See [invites.md, Errors](invites.md#errors).
+
+**Recovery sign-in and step-up** errors (`recovery_failed`, `step_up_failed`, `no_owner`, `audit_unavailable`) are listed in [recovery.md, Routes and errors](recovery.md#routes-and-errors).
 
 **Any route:** `400 invalid_request` (not a JSON object, missing fields, query string), `403 origin_denied`, `404 not_found`, `405 method_not_allowed`, `408 body_timeout`, `413 body_too_large`, `415 unsupported_media_type`, `429 rate_limited`, `503 too_many_challenges`, `503 identity_unavailable` (the store file is corrupt or unreadable; details go to stderr as a code), `500 internal_error`.
 
@@ -192,19 +209,22 @@ Ceremonies (`skill/lib/identity/passkeys.mjs`) tie the verifier to the challenge
 
 ```js
 const ceremonies = createPasskeyCeremonies({ store, rpId, origins, challenges? });
-ceremonies.startRegistration({ displayName? })       // { challengeId, publicKey }
-ceremonies.finishRegistration({ challengeId, response, label? })  // { userId, credentialId, createdOwner }
+ceremonies.startRegistration({ userId, sessionId })  // owner session: { challengeId, publicKey }
+ceremonies.startRegistration({ displayName, firstOwner: true })  // first owner (refused once one exists)
+ceremonies.finishRegistration({ challengeId, response, label?, sessionId? | firstOwner? })  // { userId, credentialId, createdOwner }
 ceremonies.startInvitation({ token })                 // { challengeId, publicKey }; needs createPasskeyCeremonies({ invites })
 ceremonies.finishInvitation({ token, challengeId, response, label? })  // { userId, role, credentialId, credentialLabel, inviteId }
 ceremonies.startAuthentication()                      // { challengeId, publicKey }
 ceremonies.finishAuthentication({ challengeId, response })        // { userId, role, credentialId, counter }
+ceremonies.startStepUp({ userId, sessionId })         // { challengeId, publicKey } for the owner's passkeys
+ceremonies.finishStepUp({ challengeId, response, userId, sessionId })  // { userId, credentialId, counter }
 ```
 
-`finishAuthentication()` returns the verified user id, role, and the label of the passkey used, and leaves the session decision to the caller. It throws `WebAuthnError`, `ChallengeError`, `PasskeyError` (`unknown_credential`, `user_disabled`), or `IdentityStoreError`; network-facing callers must collapse them as described under [Errors](#errors). `createPasskeyApi()` in `skill/lib/identity/passkey-http.mjs` provides the HTTP routes; its `onSignIn(result, { origin, req })` callback returns the response headers that grant a session (`serve.mjs` creates one in the [sessions store](sessions.md)). It is also called after an invite enrollment, with the new member's result.
+`finishAuthentication()` returns the verified user id, role, and the label of the passkey used, and leaves the session decision to the caller. It throws `WebAuthnError`, `ChallengeError`, `PasskeyError` (`unknown_credential`, `user_disabled`), or `IdentityStoreError`; network-facing callers must collapse them as described under [Errors](#errors). `createPasskeyApi()` in `skill/lib/identity/passkey-http.mjs` provides the HTTP routes; its `onSignIn(result, { origin, req })` callback returns the response headers that grant a session (`serve.mjs` creates one in the [sessions store](sessions.md)). It is also called after an invite enrollment, with the new member's result. `authorizeRegistration(req)` and `authorizeStepUp(req)` return the owner session allowed to register or step up (or throw), `onStepUp` records a step-up, `recovery` supplies the token check, the owner, and the audit log, and `onRecoverySignIn` creates the recovery session.
 
 ## Not in this phase
 
-- Owner recovery (#11). Members get their first passkey through invites ([`invites.md`](invites.md)); adding further passkeys for an existing member is not supported yet.
+- Adding further passkeys for an existing member. Members get their first passkey through invites ([`invites.md`](invites.md)); the owner adds passkeys from `/auth/settings/` and recovers with the recovery token ([`recovery.md`](recovery.md)).
 - Passkey routes in the standalone `intents-service.mjs`. The issue scope mentions it, but it has no sign-in surface to cover: it serves only the intents API on loopback, behind an authenticating reverse proxy that owns operator sign-in and forwards the operator as `X-Cockpit-Principal` together with a shared proxy secret. It issues no cookie and has no session, login page, or token of its own, so a passkey sign-in there would have nothing to grant; sign-in belongs to the proxy (or to `serve.mjs --passkeys`). Per-device sessions (#9) were added to `serve.mjs` only; the service still accepts only the proxy's shared secret. `createPasskeyApi()` and `createAccountApi()` are transport-free, so mounting them there later is small.
 - Attestation formats other than `none`, algorithms other than ES256 and RS256, cross-origin iframes, and conditional (autofill) UI.
 
@@ -212,8 +232,8 @@ ceremonies.finishAuthentication({ challengeId, response })        // { userId, r
 
 - `test/cbor.test.mjs`: the decoder, including malformed, truncated, non-minimal, oversized, and deeply nested input, and a mutation fuzz loop.
 - `test/webauthn.test.mjs`: the verifier with synthetic ES256 and RS256 credentials generated at runtime, and one negative test per item in #8.
-- `test/passkey-ceremonies.test.mjs`: challenges and ceremonies with a real identity store, including the unknown-credential dummy verification.
-- `test/passkey-serve.test.mjs`: HTTP error mapping, rate limits, the login page CSP, and `serve.mjs` end to end. Session behavior is tested in `test/sessions.test.mjs` and `test/session-serve.test.mjs` (see [`sessions.md`](sessions.md)), and invites in `test/invites.test.mjs` and `test/invite-serve.test.mjs` (see [`invites.md`](invites.md)).
+- `test/passkey-ceremonies.test.mjs`: challenges and ceremonies with a real identity store, including the unknown-credential dummy verification, the step-up ceremony, and session-bound registration challenges.
+- `test/passkey-serve.test.mjs`: HTTP error mapping, rate limits, the login page CSP, the tokenized URL and server-token cookie ignored with `--passkeys`, and `serve.mjs` end to end. Recovery and step-up are tested in `test/recovery.test.mjs`, `test/recovery-serve.test.mjs`, and `test/recovery-page.test.mjs` (see [`recovery.md`](recovery.md#tests)). Session behavior is tested in `test/sessions.test.mjs` and `test/session-serve.test.mjs` (see [`sessions.md`](sessions.md)), and invites in `test/invites.test.mjs` and `test/invite-serve.test.mjs` (see [`invites.md`](invites.md)).
 - `test/webauthn-fixtures.test.mjs`: recorded real-browser fixtures from `test/fixtures/webauthn/*.json`, plus its harness run on a synthetic fixture.
 
 ### Recorded fixtures
