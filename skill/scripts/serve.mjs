@@ -48,7 +48,11 @@ Options:
                       Extra webhook headers, one "Name: value" per line,
                       file must be chmod 600 (or
                       COCKPIT_INTENTS_WEBHOOK_HEADERS_FILE)
-  --help              Show this help
+  --identity-store <path>
+                      Users and passkeys file; must be outside the root
+                      (default: per-repo state dir, or serve.toml
+                      identity_store)
+  --help             Show this help
 `;
 }
 
