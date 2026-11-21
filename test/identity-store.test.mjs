@@ -153,6 +153,27 @@ test('createUser rejects a second owner, unknown roles, bad names, and duplicate
   assert.equal(store.load().users.length, 3);
 });
 
+test('display names and labels reject bidi and invisible formatting characters', () => {
+  const { file, store, owner } = seeded();
+  const sneaky = ['‎', '‏', '‪', '‫', '‬', '‭', '‮', '⁦', '⁧', '⁨', '⁩', '​', '‌', '‍', '⁠', '﻿', '؜'];
+  for (const char of sneaky) {
+    const hex = char.codePointAt(0).toString(16);
+    const error = assertRejects(() => store.createUser({ displayName: `Test${char}Member` }), 'invalid_store');
+    assert.match(error.message, /bidirectional or invisible formatting/, hex);
+    assertRejects(() => store.addCredential(owner.id, credential({ label: `Phone${char}` })), 'invalid_store');
+  }
+  assert.equal(store.createUser({ displayName: 'Zoë Ünïcode 測試' }).display_name, 'Zoë Ünïcode 測試');
+
+  const doc = validDoc();
+  doc.users[1].display_name = 'Test‮Member';
+  writeDoc(file, doc);
+  assertRejects(() => store.load(), 'invalid_store');
+  doc.users[1].display_name = 'Test Member';
+  doc.users[0].credentials[0].label = '​Laptop';
+  writeDoc(file, doc);
+  assertRejects(() => store.load(), 'invalid_store');
+});
+
 test('addCredential stores base64url credential ids and COSE public keys', () => {
   const { store, owner } = seeded();
   const input = credential();

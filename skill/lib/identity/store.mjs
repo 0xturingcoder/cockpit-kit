@@ -54,6 +54,10 @@ const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 const TRANSPORT_RE = /^[a-z][a-z0-9-]{0,31}$/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+// Bidi controls and invisible formatting characters (zero-width space and
+// joiners, word joiner, invisible operators, BOM) can make one name look like
+// another, and names are shown as verified authors.
+const FORMAT_RE = /[\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 const DEFAULT_LOCK_WAIT_MS = 5000;
 const DEFAULT_LOCK_STALE_MS = 30000;
 const CHECK_MODE = process.platform !== 'win32';
@@ -93,6 +97,7 @@ const checkText = (value, { at, min, max }) => {
   if (value !== value.trim()) fail(`${at} must not start or end with whitespace`);
   if ([...value].length < min || [...value].length > max) fail(`${at} must be ${min} to ${max} characters`);
   if (CONTROL_RE.test(value)) fail(`${at} must not contain control characters`);
+  if (FORMAT_RE.test(value)) fail(`${at} must not contain bidirectional or invisible formatting characters`);
   return value;
 };
 
@@ -666,7 +671,7 @@ export const openIdentityStore = ({
  *
  * @typedef {object} IdentityUser
  * @property {string} id Stable opaque id (8-64 chars of A-Z a-z 0-9 _ -).
- * @property {string} display_name 1-128 characters, no control characters.
+ * @property {string} display_name 1-128 characters, no control, bidi, or invisible formatting characters.
  * @property {'owner' | 'member'} role
  * @property {boolean} disabled Disabled users must not sign in.
  * @property {string} created_at ISO 8601 UTC timestamp.

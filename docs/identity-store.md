@@ -60,7 +60,7 @@ User fields:
 | Field | Rule |
 | --- | --- |
 | `id` | Stable, opaque, unique. 8 to 64 characters of `A-Z a-z 0-9 _ -`. Generated as `usr_` plus 16 random bytes in base64url unless the caller supplies one. Never reused, never derived from the name. |
-| `display_name` | 1 to 128 characters, no leading or trailing whitespace, no control characters. |
+| `display_name` | 1 to 128 characters, no leading or trailing whitespace, no control characters, and no bidirectional or invisible formatting characters (U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064, U+2066 to U+2069, U+061C, U+180E, U+FEFF), so one name cannot be made to look like another. |
 | `role` | `owner` or `member`. Exactly one user is the `owner`. |
 | `disabled` | `true` or `false`. Disabled users must not sign in. |
 | `created_at` | ISO 8601 UTC timestamp, as written by `Date.prototype.toISOString()`. |
@@ -75,7 +75,7 @@ Credential fields:
 | `counter` | Last accepted signature counter, an integer from 0 to 2^32-1. |
 | `transports` | Up to 8 distinct lowercase transport hints (`usb`, `nfc`, `ble`, `smart-card`, `hybrid`, `internal`, ...), as reported by the browser. |
 | `created_at` | ISO 8601 UTC timestamp. |
-| `label` | Operator-facing name for the device, 0 to 64 characters, no control characters. |
+| `label` | Operator-facing name for the device, 0 to 64 characters, with the same character rules as `display_name`. |
 
 The per-field limits (1000 users, 32 credentials per user, and the sizes above) bound each record. The whole file must also fit in 1 MiB, and that cap is reached first (see [File safety](#file-safety)).
 
