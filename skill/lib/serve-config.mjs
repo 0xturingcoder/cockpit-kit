@@ -125,18 +125,27 @@ function defaultIdentityStore(root, env) {
   return hasStateBase ? path.join(stateDirFor(root, env), IDENTITY_STORE_FILE) : null;
 }
 
-// The identity store holds credentials, so it must never be servable: the
-// path must be absolute (or start with ~/) and resolve outside the root.
-export function resolveIdentityStorePath(value, { root, env, source }) {
-  if (value === undefined) return defaultIdentityStore(root, env);
-  const expanded = expandHome(value, env);
-  if (!path.isAbsolute(expanded)) throw new ArgumentError(`${source} must be an absolute path or start with ~/`);
+function checkOutsideRoot(file, root, source) {
   try {
-    return path.resolve(assertOutsideRoot(expanded, root, source));
+    return path.resolve(assertOutsideRoot(file, root, source));
   } catch (error) {
     if (error instanceof IdentityStoreError) throw new ArgumentError(error.message);
     throw error;
   }
+}
+
+// The identity store holds credentials, so it must never be servable: the
+// path must be absolute (or start with ~/) and resolve outside the root. The
+// default state-dir path is checked too, since XDG_STATE_HOME or HOME can
+// point inside the root.
+export function resolveIdentityStorePath(value, { root, env, source }) {
+  if (value === undefined) {
+    const fallback = defaultIdentityStore(root, env);
+    return fallback && checkOutsideRoot(fallback, root, 'default identity store (XDG_STATE_HOME or HOME state dir)');
+  }
+  const expanded = expandHome(value, env);
+  if (!path.isAbsolute(expanded)) throw new ArgumentError(`${source} must be an absolute path or start with ~/`);
+  return checkOutsideRoot(expanded, root, source);
 }
 
 export function parseServeConfig({ argv = [], env, stderr } = {}) {

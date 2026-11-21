@@ -12,7 +12,7 @@ One private JSON file per knowledge repo. The path comes from the serve config, 
 2. `identity_store = "<path>"` in `<root>/.cockpit/serve.toml`.
 3. Default: `${XDG_STATE_HOME:-~/.local/state}/cockpit-kit/<repo-hash>/identity.json`, next to the intents state.
 
-Configured paths must be absolute or start with `~/`. `parseServeConfig()` returns the result as `identityStore` and refuses to start if the path is inside the served root. `openIdentityStore()` checks again. Both checks compare the resolved path, so `..` segments cannot lead back into the root, and the real path, so a symlinked directory that points at the root is refused too. A path that goes through the root is also refused, even if a symlink inside the root leads somewhere else.
+Configured paths must be absolute or start with `~/`. `parseServeConfig()` returns the result as `identityStore` and refuses to start if the path is inside the served root. The default path is checked the same way, so an `XDG_STATE_HOME` or `HOME` inside the root is refused too. `openIdentityStore()` checks again. Both checks compare the resolved path, so `..` segments cannot lead back into the root, and the real path, so a symlinked directory that points at the root is refused too. A path that goes through the root is also refused, even if a symlink inside the root leads somewhere else.
 
 ## File safety
 

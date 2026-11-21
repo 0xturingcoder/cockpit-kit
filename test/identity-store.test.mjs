@@ -408,3 +408,20 @@ test('serve config resolves the identity store path and refuses one inside the r
   fs.writeFileSync(serveToml, 'identity_store = 42\n');
   assert.throws(() => parseServeConfig({ argv: [], env }), /non-empty path string/);
 });
+
+test('serve config refuses a default identity store inside the root', () => {
+  const { base, root } = makeLayout();
+  const env = { ...process.env, HOME: path.join(base, 'home'), XDG_STATE_HOME: path.join(root, 'state') };
+  delete env.COCKPIT_HOME;
+  delete env.XDG_CONFIG_HOME;
+  writeConfig(env, { cockpit_root: root });
+  assert.throws(() => parseServeConfig({ argv: [], env }), /default identity store .* must be outside the served Cockpit root/);
+
+  const inRootHome = { ...env, HOME: path.join(root, 'home') };
+  delete inRootHome.XDG_STATE_HOME;
+  writeConfig(inRootHome, { cockpit_root: root });
+  assert.throws(() => parseServeConfig({ argv: [], env: inRootHome }), /default identity store .* must be outside the served Cockpit root/);
+
+  const outside = path.join(base, 'private', 'identity.json');
+  assert.equal(parseServeConfig({ argv: ['--identity-store', outside], env }).identityStore, outside);
+});
