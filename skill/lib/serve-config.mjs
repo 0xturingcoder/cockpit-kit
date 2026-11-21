@@ -82,6 +82,7 @@ export function parseStepUpWindow(value, source = '--step-up-window') {
 }
 
 function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
+  if (flags.printTokenToNonTty && !flags.rotateToken) throw new ArgumentError('--print-token-to-non-tty requires --rotate-token');
   if (!flags.passkeys) {
     if (flags.rpId !== undefined) throw new ArgumentError('--rp-id requires --passkeys');
     if (flags.sessionLifetime !== undefined) throw new ArgumentError('--session-lifetime requires --passkeys');
@@ -100,6 +101,7 @@ function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
       auditStore: null,
       stepUpWindowMs: null,
       rotateToken: false,
+      printTokenToNonTty: false,
       recoveryEnroll: false,
     };
   }
@@ -138,6 +140,7 @@ function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
     auditStore,
     stepUpWindowMs,
     rotateToken: flags.rotateToken === true,
+    printTokenToNonTty: flags.printTokenToNonTty === true,
     recoveryEnroll: flags.recoveryEnroll === true,
   };
 }
@@ -182,6 +185,7 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg.startsWith('--step-up-window=')) flags.stepUpWindow = arg.slice('--step-up-window='.length);
     else if (arg === '--rotate-token') flags.rotateToken = true;
+    else if (arg === '--print-token-to-non-tty') flags.printTokenToNonTty = true;
     else if (arg === '--recovery-enroll') flags.recoveryEnroll = true;
     else if (arg === '--origin') {
       flags.origins = [...(flags.origins ?? []), parseOrigin(takeValue(argv, index, arg), '--origin')];

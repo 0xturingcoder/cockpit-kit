@@ -41,7 +41,8 @@ All passkey settings come from the command line. None are read from `.cockpit/se
 | `--session-lifetime <duration>` | Lifetime of a sign-in session, such as `90d`, `12h`, or `30m` (default `90d`, from `5m` to `400d`). Requires `--passkeys`. See [`sessions.md`](sessions.md). |
 | `--invite-lifetime <duration>` | How long a member invite link stays valid, such as `24h`, `3d`, or `30m` (default `24h`, from `5m` to `7d`). Requires `--passkeys`. See [`invites.md`](invites.md). |
 | `--step-up-window <duration>` | How long a passkey step-up stays fresh for adding a passkey or creating an invite (default `5m`, from `1m` to `60m`). Requires `--passkeys`. See [`recovery.md`](recovery.md#step-up). |
-| `--rotate-token` | Replace the owner's recovery token, end every recovery session, print the new token once, and exit without serving. Requires `--passkeys`. See [`recovery.md`](recovery.md#rotation). |
+| `--rotate-token` | Replace the owner's recovery token, end every recovery session, print the new token once, and exit without serving. Refused (`non_tty_stdout`) when stdout is not a terminal. Requires `--passkeys`. See [`recovery.md`](recovery.md#rotation). |
+| `--print-token-to-non-tty` | With `--rotate-token`, print the new token even when stdout is not a terminal. Use it only when nothing keeps that output. |
 | `--recovery-enroll` | For this run only, let a recovery session add one owner passkey without a step-up, for 15 minutes or one use (when every owner passkey is lost). Requires `--passkeys`. See [`recovery.md`](recovery.md#lost-every-passkey). |
 | `--identity-store <path>` | The users and credentials file. With `--passkeys` it must come from this flag or the default state directory; `identity_store` in `.cockpit/serve.toml` is refused. If no store path can be resolved (no `HOME` or `XDG_STATE_HOME`), `--passkeys` refuses to start. |
 

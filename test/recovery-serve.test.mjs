@@ -589,7 +589,22 @@ const runServe = (layout, args, { untilLine } = {}) => new Promise((resolve, rej
   child.on('exit', (code) => resolve({ code, stdout, stderr }));
 });
 
-test('recovery CLI: a non-interactive start does not create or print a token; --rotate-token prints one once on stdout and later starts never do', async () => {
+test('recovery CLI: --rotate-token refuses a non-terminal stdout, prints no token, and leaves the stored token in place', async () => {
+  const layout = makeServeRoot();
+  const recoveryFile = statePath(layout, 'recovery.json');
+  const { token } = openRecoveryStore({ file: recoveryFile, root: layout.root }).ensure();
+  const before = fs.readFileSync(recoveryFile, 'utf8');
+  const refused = await runServe(layout, ['--rotate-token']);
+  assert.equal(refused.code, 1);
+  assert.equal(refused.stdout, '');
+  assert.match(refused.stderr, /^--rotate-token refused \(non_tty_stdout\): stdout is not a terminal.*Nothing was changed\..*--print-token-to-non-tty/);
+  assert.doesNotMatch(refused.stderr, /[A-Za-z0-9_-]{43}/, 'no token on stderr');
+  assert.equal(fs.readFileSync(recoveryFile, 'utf8'), before, 'the stored hash is unchanged');
+  assert.equal(openRecoveryStore({ file: recoveryFile, root: layout.root }).check(token), true, 'the old token still works');
+  assert.equal(fs.existsSync(statePath(layout, 'audit.json')), false, 'nothing was audited as a rotation');
+});
+
+test('recovery CLI: a non-interactive start does not create or print a token; --rotate-token --print-token-to-non-tty prints one once on stdout and later starts never do', async () => {
   const layout = makeServeRoot();
   const first = await runServe(layout, [], { untilLine: /No recovery token yet/ });
   assert.match(first.stdout, /No recovery token yet\. Run serve\.mjs with --passkeys --rotate-token in a terminal/);
@@ -597,7 +612,7 @@ test('recovery CLI: a non-interactive start does not create or print a token; --
   assert.match(first.stdout, /Serving: http:\/\/127\.0\.0\.1:\d+\/\n/, 'the Serving line has no token');
   assert.equal(fs.existsSync(statePath(layout, 'recovery.json')), false);
 
-  const rotated = await runServe(layout, ['--rotate-token']);
+  const rotated = await runServe(layout, ['--rotate-token', '--print-token-to-non-tty']);
   assert.equal(rotated.code, 0, rotated.stderr);
   const match = rotated.stdout.match(/New recovery token: ([A-Za-z0-9_-]{43})\n/);
   assert.ok(match, rotated.stdout);
@@ -630,6 +645,10 @@ test('serve config: --step-up-window, --rotate-token, and --recovery-enroll are 
   assert.throws(() => parse(['--recovery-enroll']), /--recovery-enroll requires --passkeys/);
   assert.throws(() => parse(['--passkeys', '--rotate-token', '--recovery-enroll']), /cannot be combined/);
   assert.equal(parse(['--passkeys', '--rotate-token']).rotateToken, true);
+  assert.equal(parse(['--passkeys', '--rotate-token']).printTokenToNonTty, false);
+  assert.equal(parse(['--passkeys', '--rotate-token', '--print-token-to-non-tty']).printTokenToNonTty, true);
+  assert.throws(() => parse(['--passkeys', '--print-token-to-non-tty']), /--print-token-to-non-tty requires --rotate-token/);
+  assert.throws(() => parse(['--print-token-to-non-tty']), /--print-token-to-non-tty requires --rotate-token/);
   assert.equal(parse(['--passkeys', '--recovery-enroll']).recoveryEnroll, true);
   assert.equal(parse([]).stepUpWindowMs, null);
   fs.writeFileSync(path.join(layout.root, '.cockpit', 'serve.toml'), 'step_up_window = "30m"\n');

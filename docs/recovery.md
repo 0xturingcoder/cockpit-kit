@@ -8,13 +8,13 @@ Phase 1 of passkeys and identity, after [passkey sign-in](passkeys.md), [per-dev
 | --- | --- |
 | Recovery token | 32 random bytes (`crypto.randomBytes`), base64url (43 characters). Owner only. |
 | Stored | `recovery.json` next to the identity store holds only `{ schema_version, token_hash, created_at }`, where `token_hash` is the SHA-256 of the token. The token itself is never written to disk. |
-| Shown | Once: on the first interactive `--passkeys` start, or by `--rotate-token`. Never in a response, log line, or file. |
+| Shown | Once: on the first interactive `--passkeys` start, or by `--rotate-token` in a terminal. Never in a response, log line, or file. |
 | Sign-in | `POST /auth/passkey/recovery/sign-in` `{ token }`, from the login page. Signs in the owner only, with a recovery session (no passkey, no step-up) that lasts at most 12 hours (or `--session-lifetime`, if shorter). |
 | Step-up | A fresh, user-verified assertion from one of the owner's passkeys, by a signed-in owner session. Fresh for `--step-up-window` (default 5 minutes). A passkey sign-in counts as a step-up when it happens. |
 | Needs a fresh step-up | Adding a passkey, creating an invite, and (#13) approving or revoking delegations. From every session kind. |
 | Rate limit | Every recovery-token attempt takes a token from one shared bucket: 5 at once, refilling at 5 per minute. Then `429 rate_limited` with `Retry-After`. |
 | Audit log | `audit.json` next to the identity store: at most 200 `{ at, event, result }` entries; failed attempts are dropped before anything else, so a flood of them cannot push out a successful or security-relevant entry ([retention](#retention)). No token, hash, IP address, or User-Agent. Shown to the owner on `/auth/settings/` and at `GET /auth/account/audit`. |
-| Rotation | `serve.mjs --passkeys --rotate-token`: new token, every recovery session ended, old token refused, printed once. |
+| Rotation | `serve.mjs --passkeys --rotate-token`, in a terminal: new token, every recovery session ended, old token refused, printed once. |
 
 ## Keeping the token offline
 
@@ -24,7 +24,7 @@ The recovery token is as strong as an owner passkey for signing in, so treat it 
 - **Never** put it in the knowledge repo, a dotfile, shell history, a chat, an issue, a ticket, or an agent's context. Do not pass it on a command line (`--token=...` does not exist for this reason); paste it into the login page's password field.
 - Rotate it (below) whenever it may have been seen by someone else, after using it on an untrusted device, and when someone with access to it leaves.
 
-The server prints the token only when it creates one, so it does not sit in your terminal scrollback after a restart, and `serve.mjs` refuses to create one on a non-interactive start (see [First start](#first-start)), so it never lands in a service journal.
+The server prints the token only when it creates one, so it does not sit in your terminal scrollback after a restart. `serve.mjs` refuses to create one on a non-interactive start (see [First start](#first-start)), and `--rotate-token` refuses to run when stdout is not a terminal (see [Rotation](#rotation)), so it never lands in a service journal or log file.
 
 ## First start
 
@@ -90,7 +90,9 @@ Revoking sessions, removing passkeys, revoking invites, signing out, and reading
 node skill/scripts/serve.mjs --root /path/to/knowledge-repo --passkeys --rotate-token
 ```
 
-Run it in a terminal, as the user the server runs as. It does not serve; it:
+Run it in a terminal, as the user the server runs as. If stdout is not a terminal (piped, redirected to a file, or under a service manager), it changes nothing, prints no token, and exits with status 1 and `--rotate-token refused (non_tty_stdout): ...` on stderr, because the token could otherwise land in a journal or log file. Add `--print-token-to-non-tty` to print it anyway, only when nothing keeps that output (for example, piping it straight into a password manager's command-line tool).
+
+In a terminal, it does not serve; it:
 
 1. writes a new token hash to `recovery.json` under its lock (this also replaces a damaged file);
 2. revokes every recovery session (`revokeKind('recovery')` on the sessions store);
@@ -198,6 +200,6 @@ Both throw `RecoveryStoreError` with a `code` (`invalid_store`, `unsupported_sch
 ## Tests
 
 - `test/recovery.test.mjs`: the token file and audit log: creation once, rotation (including over a damaged file), format checks, audit bounds, failures-first retention under a flood, and coalescing, fail-closed loading, concurrent first starts, and nothing secret on disk.
-- `test/recovery-serve.test.mjs`: `serve.mjs` end to end: owner-only recovery sessions, the gate with no, stale, and fresh step-ups on registration and invites, step-up binding and member refusal, member precedence over a token, the account API from a recovery session, rate limits and audit entries, a 40-minute flood that leaves the successful sign-in in the log, audit fail-closed, rotation (including when the revoke fails), `--recovery-enroll`, `--step-up-window`, the CLI output, and the token absent from responses, log lines, and files.
+- `test/recovery-serve.test.mjs`: `serve.mjs` end to end: owner-only recovery sessions, the gate with no, stale, and fresh step-ups on registration and invites, step-up binding and member refusal, member precedence over a token, the account API from a recovery session, rate limits and audit entries, a 40-minute flood that leaves the successful sign-in in the log, audit fail-closed, rotation (including when the revoke fails), `--recovery-enroll`, `--step-up-window`, the CLI output (including `--rotate-token` refusing a non-terminal stdout unless `--print-token-to-non-tty` is given), and the token absent from responses, log lines, and files.
 - `test/recovery-page.test.mjs`: the login and settings page scripts in `node:vm`: the token only in POST bodies, the step-up retry, the recovery banner, and the activity list built with `textContent`.
 - `test/passkey-ceremonies.test.mjs`: the step-up ceremony and session-bound registration challenges.

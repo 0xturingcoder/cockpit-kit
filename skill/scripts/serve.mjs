@@ -102,7 +102,12 @@ Options:
                       --passkeys)
   --rotate-token      Replace the owner's recovery token, end every recovery
                       session, print the new token once, and exit (requires
-                      --passkeys; does not serve)
+                      --passkeys; does not serve). Refused when stdout is not
+                      a terminal, so the token never lands in a journal or log
+  --print-token-to-non-tty
+                      With --rotate-token, print the new token even when
+                      stdout is not a terminal (only if nothing keeps that
+                      output)
   --recovery-enroll   For this run only, let a recovery-token session add one
                       owner passkey without a passkey step-up, for 15 minutes
                       or until used (when every owner passkey is lost;
@@ -576,6 +581,10 @@ async function main() {
     return;
   }
   if (config.rotateToken) {
+    // Checked before anything is written, so a refusal leaves the old token in place.
+    if (!process.stdout.isTTY && !config.printTokenToNonTty) {
+      throw new ArgumentError('--rotate-token refused (non_tty_stdout): stdout is not a terminal, so the new token could land in a service journal or log file. Nothing was changed. Run it in a terminal, or add --print-token-to-non-tty if nothing keeps this output.');
+    }
     const { token, revoked, warnings } = rotateRecoveryToken(config);
     for (const warning of warnings) process.stderr.write(`Warning: ${warning}\n`);
     process.stdout.write(`Recovery token rotated; ${revoked} recovery session(s) ended. The old token no longer works.\n`);
