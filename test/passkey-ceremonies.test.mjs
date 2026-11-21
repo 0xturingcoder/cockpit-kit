@@ -163,7 +163,7 @@ test('ceremony: first registration creates the owner; ES256 sign-in returns the 
   assert.equal(data.users[0].credentials[0].id, credential.rawId.toString('base64url'));
 
   const signedIn = h.ceremonies.finishAuthentication(h.signInResponse(credential, { userId: result.userId, signCount: 3 }));
-  assert.deepEqual({ ...signedIn }, { userId: result.userId, role: 'owner', credentialId: result.credentialId, counter: 3 });
+  assert.deepEqual({ ...signedIn }, { userId: result.userId, role: 'owner', credentialId: result.credentialId, credentialLabel: 'Test laptop', counter: 3 });
   assert.equal(h.store.load().users[0].credentials[0].counter, 3);
 });
 

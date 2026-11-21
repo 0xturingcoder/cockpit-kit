@@ -76,3 +76,16 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); ou
 
 #status { min-height: 1.5em; margin-bottom: 0; }
 #status.error { color: var(--bad); }
+
+[hidden] { display: none !important; }
+a { color: var(--accent); }
+
+/* Settings page (/auth/settings/) */
+.settings { max-width: 40rem; }
+h3 { font-size: 1rem; margin: 1.25rem 0 0.25rem; }
+h4 { font-size: 0.95rem; margin: 0.75rem 0 0.25rem; color: var(--ink-soft); }
+.items { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+.items li { padding: 0.5rem 0; border-top: 1px solid var(--rule); }
+.items li button { margin-top: 0.5rem; }
+button.secondary { color: var(--accent); background: transparent; border: 1px solid var(--accent); min-height: 2rem; padding: 0.25rem 0.75rem; }
+.user + .user { border-top: 1px solid var(--rule); margin-top: 1rem; }

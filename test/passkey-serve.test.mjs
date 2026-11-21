@@ -215,7 +215,7 @@ const serveSignInAttempt = async ({ port, origin }, credential, { userId, signCo
   return call({ port, method: 'POST', pathname: '/auth/passkey/login/verify', body: { challenge_id: options.json.challenge_id, credential: response }, origin });
 };
 
-test('serve: passkey registration and sign-in work end to end for ES256 and RS256 and issue the session cookie', async () => {
+test('serve: passkey registration and sign-in work end to end for ES256 and RS256 and issue a per-device session cookie', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout), async (ctx) => {
     const es = makeCredential({ alg: -7 });
@@ -234,7 +234,8 @@ test('serve: passkey registration and sign-in work end to end for ES256 and RS25
       assert.equal(res.status, 200, res.text);
       assert.deepEqual(res.json, { signed_in: true, user_id: userId });
       const cookie = res.headers['set-cookie']?.[0] ?? '';
-      assert.match(cookie, new RegExp(`^cockpit_serve=${ctx.token}; HttpOnly; SameSite=Strict; Path=/$`));
+      assert.match(cookie, /^cockpit_session=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=7776000$/);
+      assert.ok(!cookie.includes(ctx.token), 'the server token is not handed out on sign-in');
       const page = await call({ port: ctx.port, pathname: '/', cookie: cookie.split(';')[0] });
       assert.equal(page.status, 200);
       assert.equal(page.text, '<h1>Home</h1>');
@@ -307,7 +308,7 @@ test('serve: sign-in option requests are rate limited', async () => {
   });
 });
 
-test('serve: a member passkey verifies but does not get the owner session cookie', async () => {
+test('serve: a member passkey sign-in gets its own session, which can read pages', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout), async (ctx) => {
     await serveRegister(ctx, makeCredential());
@@ -316,9 +317,11 @@ test('serve: a member passkey verifies but does not get the owner session cookie
     const credential = makeCredential();
     store.addCredential(member.id, { id: credential.rawId, publicKey: credential.cose });
     const res = await serveSignInAttempt(ctx, credential, { userId: member.id });
-    assert.equal(res.status, 403);
-    assert.equal(res.json.error.code, 'session_unavailable');
-    assert.equal(res.headers['set-cookie'], undefined);
+    assert.equal(res.status, 200, res.text);
+    assert.deepEqual(res.json, { signed_in: true, user_id: member.id });
+    const cookie = res.headers['set-cookie'][0].split(';')[0];
+    assert.match(cookie, /^cockpit_session=/);
+    assert.equal((await call({ port: ctx.port, pathname: '/', cookie })).status, 200);
   });
 });
 
@@ -405,7 +408,7 @@ test('serve: login page files on disk have no inline script and use only same-or
   const dir = path.join(repoRoot, 'skill', 'templates', 'login');
   const html = fs.readFileSync(path.join(dir, 'index.html'), 'utf8');
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>/);
-  for (const [, ref] of html.matchAll(/(?:src|href)="([^"]+)"/g)) assert.match(ref, /^\/auth\/login\//);
+  for (const [, ref] of html.matchAll(/(?:src|href)="([^"]+)"/g)) assert.match(ref, /^\/auth\/(login|settings)\//);
 });
 
 test('serve: without --passkeys, /auth/ paths are not special', async () => {

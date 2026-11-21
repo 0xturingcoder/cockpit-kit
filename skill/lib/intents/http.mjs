@@ -86,8 +86,19 @@ function parseJson(buffer) {
   return value;
 }
 
-export function csrfTokenFor(secret, principal) {
-  return crypto.createHmac('sha256', secret).update(`csrf:${principal}`).digest('hex');
+// Bound to the principal and, for a sign-in session, to that session, so a
+// token taken from one session is useless in any other.
+export function csrfTokenFor(secret, principal, session = null) {
+  return crypto.createHmac('sha256', secret).update(session ? `csrf:${principal}:session:${session}` : `csrf:${principal}`).digest('hex');
+}
+
+// authenticate() returns a principal string, { principal, session } for a
+// sign-in session, or a falsy value for "not authenticated".
+function normalizeAuth(result) {
+  if (!result) return null;
+  if (typeof result === 'string') return { principal: result, session: null };
+  if (typeof result.principal === 'string' && result.principal !== '') return { principal: result.principal, session: result.session ?? null };
+  return null;
 }
 
 function safeEqual(a, b) {
@@ -151,24 +162,25 @@ export function createIntentsApi({ root, store, allowedOrigins, authenticate, cs
     bucket.tokens -= 1;
   }
 
-  function checkMutation(req, principal) {
+  function checkMutation(req, { principal, session }) {
     const origin = req.headers.origin;
     if (!origin || origin === 'null' || !origins().has(origin)) throw new IntentError(403, 'origin_denied', 'Origin not allowed.');
     const site = req.headers['sec-fetch-site'];
     if (site && site !== 'same-origin') throw new IntentError(403, 'origin_denied', 'Cross-site request denied.');
-    if (!safeEqual(req.headers['x-cockpit-csrf'], csrfTokenFor(csrfSecret, principal))) throw new IntentError(403, 'csrf_invalid', 'Missing or invalid CSRF token.');
+    if (!safeEqual(req.headers['x-cockpit-csrf'], csrfTokenFor(csrfSecret, principal, session))) throw new IntentError(403, 'csrf_invalid', 'Missing or invalid CSRF token.');
     const type = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
     if (type !== 'application/json') throw new IntentError(415, 'unsupported_media_type', 'Use application/json.');
     if (req.headers['content-encoding'] && req.headers['content-encoding'] !== 'identity') throw new IntentError(415, 'unsupported_media_type', 'Compressed bodies are not accepted.');
     rateLimit(principal);
   }
 
-  async function mutationBody(req, principal) {
-    checkMutation(req, principal);
+  async function mutationBody(req, auth) {
+    checkMutation(req, auth);
     return parseJson(await readBody(req, LIMITS.body_bytes));
   }
 
-  async function route(req, res, url, principal) {
+  async function route(req, res, url, auth) {
+    const { principal } = auth;
     const rest = url.pathname.slice(API_PREFIX.length) || '/';
     const method = req.method;
 
@@ -176,14 +188,14 @@ export function createIntentsApi({ root, store, allowedOrigins, authenticate, cs
       return sendJson(res, 200, {
         protocol_version: PROTOCOL_VERSION,
         features: { capture: true, page_comments: true, item_comments: false, replies: true, history: true },
-        csrf_token: csrfTokenFor(csrfSecret, principal),
+        csrf_token: csrfTokenFor(csrfSecret, principal, auth.session),
         limits: { body_bytes: LIMITS.body_bytes, operator_message_bytes: LIMITS.operator_message_bytes, payload_bytes: LIMITS.payload_bytes },
         type_hints: ['note', 'correction', 'question', 'todo', 'refresh-request'],
       });
     }
 
     if (rest === '/intents' && method === 'POST') {
-      const body = await mutationBody(req, principal);
+      const body = await mutationBody(req, auth);
       const { intent, replayed } = store.mutate((state) => createIntent(state, root, body, { principal }));
       const location = `${API_PREFIX}/intents/${intent.intent_id}`;
       if (!replayed) notifyWebhook(webhookUrl, 'intent.created', intent, { log, headers: webhookHeaders });
@@ -217,13 +229,13 @@ export function createIntentsApi({ root, store, allowedOrigins, authenticate, cs
         return sendJson(res, 200, publicIntent(intent));
       }
       if (action === '/replies' && method === 'POST') {
-        const body = await mutationBody(req, principal);
+        const body = await mutationBody(req, auth);
         const { intent, replayed } = store.mutate((state) => replyIntent(state, id, body, { principal }));
         if (!replayed) notifyWebhook(webhookUrl, 'intent.reply', intent, { log, headers: webhookHeaders });
         return sendJson(res, 200, { intent_id: intent.intent_id, state: intent.state, status: publicIntent(intent).status, version: intent.version, replayed });
       }
       if (action === '/archive' && method === 'POST') {
-        const body = await mutationBody(req, principal);
+        const body = await mutationBody(req, auth);
         const { intent, replayed } = store.mutate((state) => operatorArchive(state, id, body, { principal }));
         return sendJson(res, 200, { intent_id: intent.intent_id, state: intent.state, status: publicIntent(intent).status, version: intent.version, replayed });
       }
@@ -246,9 +258,9 @@ export function createIntentsApi({ root, store, allowedOrigins, authenticate, cs
       if (url.searchParams.has('token') || url.searchParams.has('access_token')) {
         throw new IntentError(400, 'credential_in_url', 'Credentials are not accepted in URLs.');
       }
-      const principal = await authenticate(req);
-      if (!principal) throw new IntentError(401, 'authentication_required', 'Authentication required.');
-      await route(req, res, url, principal);
+      const auth = normalizeAuth(await authenticate(req));
+      if (!auth) throw new IntentError(401, 'authentication_required', 'Authentication required.');
+      await route(req, res, url, auth);
     })().catch((error) => {
       if (!(error instanceof IntentError) && !(error instanceof StoreError)) log(`intents api error: ${error.name}`);
       if (!res.headersSent) sendError(res, error);

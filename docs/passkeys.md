@@ -2,7 +2,7 @@
 
 Phase 1 of passkeys and identity, after the [users and credentials store](identity-store.md). `serve.mjs --passkeys` adds passkey registration and sign-in and a small login page. Verification is built on `node:crypto` with no dependencies, and it supports a deliberately narrow subset of WebAuthn.
 
-A successful sign-in produces a verified user id. For the owner, `serve.mjs` then issues the existing session cookie (the same cookie the tokenized URL sets). Per-device sessions replace that cookie in #9; until then, a member's passkey verifies but gets no session (`403 session_unavailable`), because the cookie is the single owner-level token.
+A successful sign-in produces a verified user id, and `serve.mjs` creates a new per-device session for that user, owner or member, with its own `cockpit_session` cookie. Sessions, their lifetime, listing and revoking them, the settings page, and which routes accept them are described in [`sessions.md`](sessions.md).
 
 ## Quick start
 
@@ -15,11 +15,12 @@ The server prints two extra lines:
 ```text
 Passkeys: sign in at http://localhost:18765/auth/login/ (relying party localhost)
 Add a passkey: http://localhost:18765/auth/login/?token=<token>
+Devices and sign out: http://localhost:18765/auth/settings/
 ```
 
-1. Open the "Add a passkey" URL. The token sets the session cookie and redirects to the login page.
+1. Open the "Add a passkey" URL. The token sets the server-token cookie and redirects to the login page.
 2. Enter your name (only used to create the owner, when the identity store does not exist yet), optionally a device label, and choose **Add a passkey**.
-3. Later, from any browser that has the passkey, open `/auth/login/` and choose **Sign in with a passkey**.
+3. Later, from any browser that has the passkey, open `/auth/login/` and choose **Sign in with a passkey**. Each sign-in is a separate session; manage them at `/auth/settings/`.
 
 Use `localhost`, not `127.0.0.1`: browsers do not allow an IP address as a relying-party id, so passkeys created on `localhost` work only on `localhost` origins.
 
@@ -32,6 +33,7 @@ All passkey settings come from the command line. None are read from `.cockpit/se
 | `--passkeys` | Enable the login page at `/auth/login/` and the API at `/auth/passkey/*`. Requires auth (`--passkeys --no-auth` is refused) and an identity store. |
 | `--rp-id <domain>` | Relying-party id. Default `localhost`. A lowercase domain name of at least two labels (or `localhost`): no scheme, port, path, trailing dot, IP address, or bare top-level domain such as `com`. Requires `--passkeys`. |
 | `--origin <origin>` | Exact browser origin, repeatable. Shared with `--write`. Without it, the only passkey origin is `http://localhost:<port>`. Each origin must use `https` (or `http` with the host `localhost`), and its host must be the rp id or a subdomain of it. |
+| `--session-lifetime <duration>` | Lifetime of a sign-in session, such as `90d`, `12h`, or `30m` (default `90d`, from `5m` to `400d`). Requires `--passkeys`. See [`sessions.md`](sessions.md). |
 | `--identity-store <path>` | The users and credentials file. With `--passkeys` it must come from this flag or the default state directory; `identity_store` in `.cockpit/serve.toml` is refused. If no store path can be resolved (no `HOME` or `XDG_STATE_HOME`), `--passkeys` refuses to start. |
 
 Mismatches fail at startup. The relying-party id and origins are never taken from `Host`, `Origin`, `X-Forwarded-*`, or any other request header; the request `Origin` is only compared against the configured list.
@@ -43,25 +45,25 @@ node skill/scripts/serve.mjs --root /path/to/knowledge-repo --passkeys \
   --rp-id example.com --origin https://cockpit.example.com
 ```
 
-The proxy must still present a loopback `Host` header, as for any `serve.mjs` request. On an `https` origin the passkey session cookie gets the `Secure` attribute. The cookie set by the tokenized URL gets it too when every configured `--origin` is `https`.
+The proxy must still present a loopback `Host` header, as for any `serve.mjs` request. On an `https` origin the session cookie gets the `Secure` attribute. The server-token cookie set by the tokenized URL gets it too when every configured `--origin` is `https`.
 
 ## Ceremonies
 
 ### Registration (owner only)
 
-Registration needs the existing operator session (the token cookie). If the identity store does not exist yet, the first registration creates the owner, writing the owner and the passkey in one store write so a failed first registration leaves no store behind; after that, registration adds a passkey to the owner. Members get passkeys through invites (#10).
+Registration needs the server-token cookie (from the tokenized URL); a passkey session alone cannot add a passkey. If the identity store does not exist yet, the first registration creates the owner, writing the owner and the passkey in one store write so a failed first registration leaves no store behind; after that, registration adds a passkey to the owner. Members get passkeys through invites (#10).
 
 1. `POST /auth/passkey/register/options` with `{ "display_name"?: string }`. Returns `{ challenge_id, publicKey }`, where `publicKey` is `PublicKeyCredentialCreationOptions` with base64url binary fields: `rp`, `user` (the user handle is the UTF-8 user id), `challenge`, `pubKeyCredParams` (-7, then -257), `timeout`, `attestation: "none"`, `authenticatorSelection` (`residentKey: "required"`, `userVerification: "required"`), and `excludeCredentials` (the owner's existing passkeys).
 2. The page calls `navigator.credentials.create()`.
 3. `POST /auth/passkey/register/verify` with `{ challenge_id, credential, label?: string }`. `credential` is the `PublicKeyCredential` as JSON (base64url fields, as `toJSON()` produces). Returns `201 { registered: true, user_id, credential_id, created_owner }`.
 
-The challenge is bound to the user it was issued for, so the response can only add a credential to that user. Note that with `none` attestation nothing in the registration response is signed; registration is trusted because the operator session authorized it, not because of the response.
+The challenge is bound to the user it was issued for, so the response can only add a credential to that user. Note that with `none` attestation nothing in the registration response is signed; registration is trusted because the server token authorized it, not because of the response.
 
 ### Sign-in (usernameless)
 
 1. `POST /auth/passkey/login/options` with `{}`. Returns `{ challenge_id, publicKey }` with `challenge`, `rpId`, `timeout`, `userVerification: "required"`, and an empty `allowCredentials`. Nothing names a user, so the options never reveal who exists.
 2. The page calls `navigator.credentials.get()`.
-3. `POST /auth/passkey/login/verify` with `{ challenge_id, credential }`. The server consumes the challenge, looks up the credential by `rawId`, verifies the response against the stored public key (including that the user handle names the credential's owner), refuses disabled users, and stores the new signature counter. Returns `200 { signed_in: true, user_id }` and, for the owner, `Set-Cookie: cockpit_serve=...; HttpOnly; SameSite=Strict; Path=/` (plus `Secure` on https).
+3. `POST /auth/passkey/login/verify` with `{ challenge_id, credential }`. The server consumes the challenge, looks up the credential by `rawId`, verifies the response against the stored public key (including that the user handle names the credential's owner), refuses disabled users, and stores the new signature counter. Returns `200 { signed_in: true, user_id }` and a new session: `Set-Cookie: cockpit_session=<token>; HttpOnly; SameSite=Strict; Path=/; Max-Age=7776000` (the session lifetime in seconds, plus `Secure` on https).
 
 ### Requests
 
@@ -110,8 +112,8 @@ Every error response is `{ "error": { "code", "message" } }` with a fixed messag
 | Status | Code | When |
 | --- | --- | --- |
 | 401 | `sign_in_failed` | Any verifier error, unknown or consumed or expired or wrong-ceremony challenge, unknown credential, disabled user, wrong user handle, counter regression. The specific reason is logged to stderr as a code only. |
-| 403 | `session_unavailable` | Verified, but the user is a member (sessions for members come with #9). |
-| 503 | `store_busy` | The identity store lock was busy for more than 1 second while saving the counter. Retry. |
+| 503 | `store_busy` | The identity or sessions store lock was busy for more than 1 second while saving the counter or the new session. Retry. |
+| 503 | `identity_unavailable` | Verified, but the session could not be saved (the sessions file is corrupt or unreadable). |
 
 Timing: an unknown credential id is not refused early. The server runs the full verification against a dummy public key of the same algorithm family (ES256, or RS256 when the signature has RSA length), generated at startup with its private half discarded, and then refuses with the same generic error. A disabled user is refused only after the real verification. So a failed sign-in does the same parsing and one signature verification whether or not the credential id is registered. Residual differences: the dummy RSA key is 2048-bit, so a registered 3072- or 4096-bit RSA key verifies a little more slowly, and a successful verification is followed by a counter write. Credential ids are random values chosen by authenticators, so even a measurable difference would not reveal users.
 
@@ -121,7 +123,7 @@ Timing: an unknown credential id is not refused early. The server runs the full 
 | --- | --- | --- |
 | 400 | verifier code (table below), `challenge_unknown`, `challenge_expired`, `wrong_ceremony` | The response or challenge was refused. |
 | 400 | `invalid_argument` | A bad `display_name` or `label` (the message names the field and rule, never the value). |
-| 401 | `authentication_required` | No operator session. |
+| 401 | `authentication_required` | No server-token cookie. |
 | 403 | `user_disabled` | The target user is disabled. |
 | 409 | `credential_exists` | That credential is already registered. |
 | 409 | `owner_conflict` / `user_missing` | The store changed during the ceremony; start again. |
@@ -182,12 +184,12 @@ ceremonies.startAuthentication()                      // { challengeId, publicKe
 ceremonies.finishAuthentication({ challengeId, response })        // { userId, role, credentialId, counter }
 ```
 
-`finishAuthentication()` is the hook for #9: it returns the verified user id (and role) and leaves the session decision to the caller. It throws `WebAuthnError`, `ChallengeError`, `PasskeyError` (`unknown_credential`, `user_disabled`), or `IdentityStoreError`; network-facing callers must collapse them as described under [Errors](#errors). `createPasskeyApi()` in `skill/lib/identity/passkey-http.mjs` provides the HTTP routes; its `onSignIn(result, { origin })` callback returns the response headers that grant a session.
+`finishAuthentication()` returns the verified user id, role, and the label of the passkey used, and leaves the session decision to the caller. It throws `WebAuthnError`, `ChallengeError`, `PasskeyError` (`unknown_credential`, `user_disabled`), or `IdentityStoreError`; network-facing callers must collapse them as described under [Errors](#errors). `createPasskeyApi()` in `skill/lib/identity/passkey-http.mjs` provides the HTTP routes; its `onSignIn(result, { origin, req })` callback returns the response headers that grant a session (`serve.mjs` creates one in the [sessions store](sessions.md)).
 
 ## Not in this phase
 
-- Passkeys for members, invites (#10), per-device sessions (#9), and owner recovery (#11).
-- Passkey routes in the standalone `intents-service.mjs`. The issue scope mentions it, but it has no sign-in surface to cover: it serves only the intents API on loopback, behind an authenticating reverse proxy that owns operator sign-in and forwards the operator as `X-Cockpit-Principal` together with a shared proxy secret. It issues no cookie and has no session, login page, or token of its own, so a passkey sign-in there would have nothing to grant; sign-in belongs to the proxy (or to `serve.mjs --passkeys`). `createPasskeyApi()` is transport-free, so if the service later gets its own sessions (for example with #9), mounting the routes there is small.
+- Registering passkeys for members, invites (#10), and owner recovery (#11). Members whose passkeys were added through the identity store API can sign in and get a session.
+- Passkey routes in the standalone `intents-service.mjs`. The issue scope mentions it, but it has no sign-in surface to cover: it serves only the intents API on loopback, behind an authenticating reverse proxy that owns operator sign-in and forwards the operator as `X-Cockpit-Principal` together with a shared proxy secret. It issues no cookie and has no session, login page, or token of its own, so a passkey sign-in there would have nothing to grant; sign-in belongs to the proxy (or to `serve.mjs --passkeys`). Per-device sessions (#9) were added to `serve.mjs` only; the service still accepts only the proxy's shared secret. `createPasskeyApi()` and `createAccountApi()` are transport-free, so mounting them there later is small.
 - Attestation formats other than `none`, algorithms other than ES256 and RS256, cross-origin iframes, and conditional (autofill) UI.
 
 ## Tests
@@ -195,7 +197,7 @@ ceremonies.finishAuthentication({ challengeId, response })        // { userId, r
 - `test/cbor.test.mjs`: the decoder, including malformed, truncated, non-minimal, oversized, and deeply nested input, and a mutation fuzz loop.
 - `test/webauthn.test.mjs`: the verifier with synthetic ES256 and RS256 credentials generated at runtime, and one negative test per item in #8.
 - `test/passkey-ceremonies.test.mjs`: challenges and ceremonies with a real identity store, including the unknown-credential dummy verification.
-- `test/passkey-serve.test.mjs`: HTTP error mapping, rate limits, the login page CSP, and `serve.mjs` end to end.
+- `test/passkey-serve.test.mjs`: HTTP error mapping, rate limits, the login page CSP, and `serve.mjs` end to end. Session behavior is tested in `test/sessions.test.mjs` and `test/session-serve.test.mjs` (see [`sessions.md`](sessions.md)).
 - `test/webauthn-fixtures.test.mjs`: recorded real-browser fixtures from `test/fixtures/webauthn/*.json`, plus its harness run on a synthetic fixture.
 
 ### Recorded fixtures
