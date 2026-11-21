@@ -443,7 +443,9 @@ test('id and rawId must be the same canonical base64url', () => {
   const check = (response, expected) => assert.throws(() => verifyRegistration({ response, expectedChallenge, rpId: RP_ID, origins }), code(expected));
   check({ ...base(), id: b64u(crypto.randomBytes(32)) }, 'credential_id_mismatch');
   check({ ...base(), rawId: `${base().rawId}=` }, 'malformed_response');
-  check({ ...base(), rawId: base().rawId.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A')) }, 'credential_id_mismatch');
+  // Change the first character: every bit of it is significant, so the result
+  // stays canonical (changing the last one could set stray low bits).
+  check({ ...base(), rawId: base().rawId.replace(/^./, (c) => (c === 'A' ? 'B' : 'A')) }, 'credential_id_mismatch');
   check({ ...base(), type: 'password' }, 'malformed_response');
   check({ ...base(), response: null }, 'malformed_response');
   check(null, 'malformed_response');
