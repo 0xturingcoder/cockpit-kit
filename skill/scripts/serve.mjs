@@ -15,8 +15,9 @@ import { openIdentityStore } from '../lib/identity/store.mjs';
 import { createPasskeyCeremonies } from '../lib/identity/passkeys.mjs';
 import { HttpError, createPasskeyApi } from '../lib/identity/passkey-http.mjs';
 import { SessionStoreError, openSessionStore } from '../lib/identity/sessions.mjs';
+import { openInviteStore } from '../lib/identity/invites.mjs';
 import {
-  SESSION_COOKIE, createAccountApi, createSessionAuth, deviceLabel, expiredCookie, parseCookies, sessionCookie,
+  INVITE_PATH, SESSION_COOKIE, createAccountApi, createSessionAuth, deviceLabel, expiredCookie, parseCookies, sessionCookie,
 } from '../lib/identity/session-http.mjs';
 
 const cookieName = 'cockpit_serve';
@@ -31,10 +32,12 @@ const kitAssets = new Map([
   ['/auth/login/cockpit-login.css', 'login/cockpit-login.css'],
   ['/auth/settings/', 'settings/index.html'],
   ['/auth/settings/cockpit-settings.js', 'settings/cockpit-settings.js'],
+  [INVITE_PATH, 'invite/index.html'],
+  [`${INVITE_PATH}cockpit-invite.js`, 'invite/cockpit-invite.js'],
 ]);
-const kitRedirects = new Map([['/auth/login', loginPath], ['/auth/settings', settingsPath]]);
-// The login and settings pages load only their own same-origin scripts and
-// stylesheet and talk only to this server.
+const kitRedirects = new Map([['/auth/login', loginPath], ['/auth/settings', settingsPath], ['/auth/invite', INVITE_PATH]]);
+// The login, settings, and invite pages load only their own same-origin
+// scripts and stylesheet and talk only to this server.
 const loginCsp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 // Store writes on sign-in (the signature counter) wait at most this long for
 // the identity store lock, so a busy store cannot stall the server for the
@@ -86,6 +89,10 @@ Options:
   --session-lifetime <duration>
                       Lifetime of a passkey sign-in session, such as 90d,
                       12h, or 30m (default: 90d; requires --passkeys)
+  --invite-lifetime <duration>
+                      How long a member invite link stays valid, such as
+                      24h, 3d, or 30m (default: 24h, at most 7d; requires
+                      --passkeys)
   --help              Show this help
 `;
 }
@@ -176,9 +183,10 @@ function requestToken(req) {
   }
 }
 
-// Serve the kit's own login and settings pages (never a file from the
-// knowledge repo). They hold no data; the settings page reads it from the
-// account API, which requires a session.
+// Serve the kit's own login, settings, and invite pages (never a file from
+// the knowledge repo). They hold no data; the settings page reads it from the
+// account API, which requires a session, and the invite page reads its token
+// from the URL fragment, which never reaches this server.
 function serveKitAsset(req, res, pathname) {
   if (kitRedirects.has(pathname)) {
     res.writeHead(301, { Location: kitRedirects.get(pathname), 'Cache-Control': 'no-store' });
@@ -272,22 +280,26 @@ const storeUnavailable = (error) => (error instanceof SessionStoreError && error
   ? new HttpError(503, 'store_busy', 'The sessions store is busy; retry shortly.', { 'Retry-After': '2' })
   : new HttpError(503, 'identity_unavailable', 'The sessions store is unavailable.', { 'Retry-After': '5' }));
 
-// Passkey sign-in, per-device sessions, and the account API.
-function createIdentity(server, config, { token, csrfSecret, log }) {
+// Passkey sign-in, invites, per-device sessions, and the account API.
+function createIdentity(server, config, { token, csrfSecret, log, now }) {
   if (!config.auth) throw new ArgumentError('serve --passkeys requires authentication');
-  if (!config.identityStore || !config.sessionStore) throw new ArgumentError('serve --passkeys needs an identity store');
+  if (!config.identityStore || !config.sessionStore || !config.inviteStore) throw new ArgumentError('serve --passkeys needs an identity store');
   const store = openIdentityStore({ file: config.identityStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS });
   const sessions = openSessionStore({
     file: config.sessionStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS, ...(config.sessionLifetimeMs ? { lifetimeMs: config.sessionLifetimeMs } : {}),
   });
+  const invites = openInviteStore({
+    file: config.inviteStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS, now, ...(config.inviteLifetimeMs ? { lifetimeMs: config.inviteLifetimeMs } : {}),
+  });
   const sessionAuth = createSessionAuth({ sessions, identityStore: store, log });
   const origins = () => passkeyOrigins(server, config);
-  const ceremonies = createPasskeyCeremonies({ store, rpId: config.rpId, origins });
+  const ceremonies = createPasskeyCeremonies({ store, rpId: config.rpId, origins, invites });
   const passkeys = createPasskeyApi({
     ceremonies,
     allowedOrigins: origins,
     isOperator: (req) => requestHasAuth(req, token),
-    // Every passkey sign-in, owner or member, gets its own session.
+    // Every passkey sign-in, owner or member, gets its own session, and so
+    // does a member who just enrolled through an invite.
     onSignIn: (result, { origin, req }) => {
       let created;
       try {
@@ -311,6 +323,7 @@ function createIdentity(server, config, { token, csrfSecret, log }) {
     allowedOrigins: origins,
     csrfToken: (principal, sessionId) => csrfTokenFor(csrfSecret, principal, sessionId),
     signOutCookies: (secure) => [expiredCookie(SESSION_COOKIE, { secure }), expiredCookie(cookieName, { secure })],
+    invites,
     log,
   });
   return { passkeys, account, sessionAuth };
@@ -318,7 +331,10 @@ function createIdentity(server, config, { token, csrfSecret, log }) {
 
 const logToStderr = (message) => process.stderr.write(`${message}\n`);
 
-export function createServeServer(config, { token = crypto.randomBytes(32).toString('hex'), env = process.env, log = logToStderr } = {}) {
+// `now` is the clock for invite expiry (tests).
+export function createServeServer(config, {
+  token = crypto.randomBytes(32).toString('hex'), env = process.env, log = logToStderr, now = Date.now,
+} = {}) {
   let api = null;
   let identity = null;
   // One CSRF secret for the intents and account APIs, so a session has one
@@ -372,7 +388,7 @@ export function createServeServer(config, { token = crypto.randomBytes(32).toStr
     if (req.method === 'HEAD') res.end();
     else stream.pipe(res);
   });
-  if (config.passkeys) identity = createIdentity(server, config, { token, csrfSecret, log });
+  if (config.passkeys) identity = createIdentity(server, config, { token, csrfSecret, log, now });
   if (config.write) api = createWriteApi(server, config, { authFor, csrfSecret }, env);
   server.cockpitToken = token;
   return server;
@@ -410,7 +426,7 @@ async function main() {
       const [origin] = passkeyOrigins(server, boundConfig);
       process.stdout.write(`Passkeys: sign in at ${origin}${loginPath} (relying party ${config.rpId})\n`);
       process.stdout.write(`Add a passkey: ${origin}${loginPath}?token=${server.cockpitToken}\n`);
-      process.stdout.write(`Devices and sign out: ${origin}${settingsPath}\n`);
+      process.stdout.write(`Devices, invites, and sign out: ${origin}${settingsPath}\n`);
     }
   });
 }

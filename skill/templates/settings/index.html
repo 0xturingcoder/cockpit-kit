@@ -20,6 +20,23 @@
       <button type="button" id="sign-out">Sign out on this device</button>
     </section>
 
+    <section aria-labelledby="invites-heading" id="invites-section" hidden>
+      <h2 id="invites-heading">Invites</h2>
+      <p>Invite someone to sign in as a member. They open the link and create their own passkey; the link works once and expires.</p>
+      <form id="invite-form">
+        <label for="invite-name">Their name</label>
+        <input id="invite-name" name="display_name" maxlength="128" autocomplete="off">
+        <button type="submit" id="invite-create">Create invite link</button>
+      </form>
+      <div id="invite-result" hidden>
+        <label for="invite-url">Invite link <span class="hint">(shown once; send it privately)</span></label>
+        <input id="invite-url" readonly>
+        <button type="button" id="invite-copy" class="secondary">Copy link</button>
+      </div>
+      <h3>Pending invites</h3>
+      <ul id="invites" class="items"></ul>
+    </section>
+
     <section aria-labelledby="users-heading" id="users-section" hidden>
       <h2 id="users-heading">All users</h2>
       <p>As the owner you can revoke any user's sessions and remove their passkeys. Your last passkey cannot be removed.</p>
