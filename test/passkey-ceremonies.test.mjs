@@ -388,3 +388,90 @@ test('ceremony: bad relying-party config fails at construction', () => {
   const store = openIdentityStore({ file, root });
   assert.throws(() => createPasskeyCeremonies({ store, rpId: 'example.com', origins: ['https://evil.example'] }), errorCode(WebAuthnError, 'invalid_argument'));
 });
+
+// ---------------------------------------------------------------------------
+// Step-up and session-bound registration (#11)
+
+const SESSION_A = 'ses_AAAAAAAAAAAAAAAAAAAAAA';
+const SESSION_B = 'ses_BBBBBBBBBBBBBBBBBBBBBB';
+
+const stepUpResponse = (options, credential, { userId, signCount = 10, ...rest } = {}) => authenticationResponse({
+  credential, challenge: Buffer.from(options.publicKey.challenge, 'base64url'), rpId: RP_ID, origin: ORIGIN, signCount, userHandle: Buffer.from(userId, 'utf8'), ...rest,
+});
+
+test('step-up: options list the owner\'s passkeys, require user verification, and use their own challenge cap', () => {
+  const h = harness();
+  const key = makeCredential();
+  const { result } = h.registerOwner(key);
+  const options = h.ceremonies.startStepUp({ userId: result.userId, sessionId: SESSION_A });
+  assert.equal(options.publicKey.userVerification, 'required');
+  assert.deepEqual(options.publicKey.allowCredentials.map((c) => c.id), [result.credentialId]);
+  for (let i = 0; i < DEFAULT_MAX_CHALLENGES; i += 1) h.ceremonies.startAuthentication();
+  assert.ok(h.ceremonies.startStepUp({ userId: result.userId, sessionId: SESSION_A }), 'a full sign-in ceremony does not block step-up');
+  assert.throws(() => h.ceremonies.startStepUp({ userId: 'usr_memberEXAMPLEonly001', sessionId: SESSION_A }), errorCode(PasskeyError, 'not_owner'));
+  assert.throws(() => h.ceremonies.startStepUp({ userId: result.userId }), errorCode(PasskeyError, 'session_required'));
+});
+
+test('step-up: a verified assertion from an owner passkey succeeds once and stores the counter', () => {
+  const h = harness();
+  const key = makeCredential();
+  const { result } = h.registerOwner(key);
+  const options = h.ceremonies.startStepUp({ userId: result.userId, sessionId: SESSION_A });
+  const response = stepUpResponse(options, key, { userId: result.userId, signCount: 7 });
+  const done = h.ceremonies.finishStepUp({ challengeId: options.challengeId, response, userId: result.userId, sessionId: SESSION_A });
+  assert.deepEqual({ ...done }, { userId: result.userId, credentialId: result.credentialId, counter: 7 });
+  assert.equal(h.store.load().users[0].credentials[0].counter, 7);
+  assert.throws(() => h.ceremonies.finishStepUp({ challengeId: options.challengeId, response, userId: result.userId, sessionId: SESSION_A }), errorCode(ChallengeError, 'challenge_unknown'));
+});
+
+test('step-up: refused for another session, another user, a sign-in challenge, an unknown or member passkey, or without user verification', () => {
+  const h = harness();
+  const key = makeCredential();
+  const { result } = h.registerOwner(key);
+  const userId = result.userId;
+  const member = h.store.createUser({ displayName: 'Test Member' });
+  const memberKey = makeCredential();
+  h.store.addCredential(member.id, { id: memberKey.rawId, publicKey: memberKey.cose });
+  const attempt = (sessionId, credential, extra = {}) => {
+    const options = h.ceremonies.startStepUp({ userId, sessionId: SESSION_A });
+    const response = stepUpResponse(options, credential, { userId: extra.handle ?? userId, ...extra.response });
+    return () => h.ceremonies.finishStepUp({ challengeId: options.challengeId, response, userId: extra.asUser ?? userId, sessionId });
+  };
+  assert.throws(attempt(SESSION_B, key), errorCode(PasskeyError, 'wrong_session'));
+  assert.throws(attempt(SESSION_A, key, { asUser: member.id }), errorCode(PasskeyError, 'wrong_session'));
+  assert.throws(attempt(SESSION_A, makeCredential()), errorCode(PasskeyError, 'unknown_credential'));
+  assert.throws(attempt(SESSION_A, memberKey, { handle: member.id }), errorCode(PasskeyError, 'unknown_credential'));
+  assert.throws(attempt(SESSION_A, key, { response: { flags: 0x01 } }), errorCode(WebAuthnError, 'user_not_verified'));
+  const signIn = h.signInResponse(key, { userId, signCount: 20 });
+  assert.throws(() => h.ceremonies.finishStepUp({ ...signIn, userId, sessionId: SESSION_A }), errorCode(ChallengeError, 'wrong_ceremony'));
+});
+
+test('registration: a session-bound challenge cannot be finished by another session or by first-owner setup, and the reverse', () => {
+  const h = harness();
+  const key = makeCredential();
+  const { result } = h.registerOwner(key);
+  const userId = result.userId;
+  const finish = (options, bound) => h.ceremonies.finishRegistration({
+    challengeId: options.challengeId,
+    response: registrationResponse({ credential: makeCredential(), challenge: Buffer.from(options.publicKey.challenge, 'base64url'), rpId: RP_ID, origin: ORIGIN }),
+    ...bound,
+  });
+  assert.throws(() => h.ceremonies.startRegistration({ userId: 'usr_memberEXAMPLEonly001', sessionId: SESSION_A }), errorCode(PasskeyError, 'not_owner'));
+  assert.throws(() => h.ceremonies.startRegistration({ displayName: 'Mallory Example', firstOwner: true }), errorCode(PasskeyError, 'owner_exists'));
+  assert.throws(() => finish(h.ceremonies.startRegistration({ userId, sessionId: SESSION_A }), { sessionId: SESSION_B }), errorCode(PasskeyError, 'wrong_session'));
+  assert.throws(() => finish(h.ceremonies.startRegistration({ userId, sessionId: SESSION_A }), { firstOwner: true }), errorCode(PasskeyError, 'wrong_session'));
+  const added = finish(h.ceremonies.startRegistration({ userId, sessionId: SESSION_A }), { sessionId: SESSION_A });
+  assert.equal(added.userId, userId);
+  assert.equal(added.createdOwner, false);
+
+  // First-owner setup challenges finish only as first-owner setup.
+  const fresh = harness();
+  const finishFresh = (options, bound) => fresh.ceremonies.finishRegistration({
+    challengeId: options.challengeId,
+    response: registrationResponse({ credential: makeCredential(), challenge: Buffer.from(options.publicKey.challenge, 'base64url'), rpId: RP_ID, origin: ORIGIN }),
+    ...bound,
+  });
+  const setup = () => fresh.ceremonies.startRegistration({ displayName: 'Ada Example', firstOwner: true });
+  assert.throws(() => finishFresh(setup(), { sessionId: SESSION_A }), errorCode(PasskeyError, 'wrong_session'));
+  assert.equal(finishFresh(setup(), { firstOwner: true }).createdOwner, true);
+});

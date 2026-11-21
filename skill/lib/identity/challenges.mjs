@@ -1,6 +1,6 @@
 // Server-side WebAuthn challenges: random, single use, short-lived, bound to
-// one ceremony (and, for registration and invitations, to the user being
-// registered), and bounded in number per ceremony. In memory only: a restart drops every
+// one ceremony (and, for registration, invitations, and step-ups, to the user
+// and session involved), and bounded in number per ceremony. In memory only: a restart drops every
 // pending ceremony.
 import crypto from 'node:crypto';
 
@@ -9,8 +9,9 @@ export const DEFAULT_CHALLENGE_TTL_MS = 2 * 60 * 1000;
 // Per ceremony, so anonymous sign-in or invite traffic cannot use up the
 // slots that operator registration needs.
 export const DEFAULT_MAX_CHALLENGES = 64;
-// "invitation" is a registration through an invite link (invites.mjs).
-export const CEREMONIES = Object.freeze(['registration', 'authentication', 'invitation']);
+// "invitation" is a registration through an invite link (invites.mjs);
+// "step-up" is a fresh passkey verification by a signed-in owner session.
+export const CEREMONIES = Object.freeze(['registration', 'authentication', 'invitation', 'step-up']);
 
 const MESSAGES = Object.freeze({
   challenge_unknown: 'The challenge is unknown or was already used.',
@@ -57,7 +58,7 @@ export const createChallengeStore = ({ ttlMs = DEFAULT_CHALLENGE_TTL_MS, max = D
   };
 
   /**
-   * @param {{ ceremony: 'registration' | 'authentication' | 'invitation', binding?: object }} input
+   * @param {{ ceremony: 'registration' | 'authentication' | 'invitation' | 'step-up', binding?: object }} input
    *   `binding` is stored with the challenge and returned by consume(), e.g.
    *   the user a registration is for.
    */
