@@ -99,7 +99,7 @@ const hit = findCredential(data, credential.id); // { user, credential } or null
 
 | Function | Behavior |
 | --- | --- |
-| `openIdentityStore({ file, root, now? })` | Checks that `file` is absolute and outside `root`, then returns a frozen store object. Nothing is read or written yet. `now` is an optional clock for tests. |
+| `openIdentityStore({ file, root, now?, lockWaitMs?, lockStaleMs? })` | Checks that `file` is absolute and outside `root`, then returns a frozen store object. Nothing is read or written yet. `now` is an optional clock for tests. `lockWaitMs` (default 5000) is how long a change waits for a busy lock, and `lockStaleMs` (default 30000) is the age after which a lock counts as abandoned. |
 | `store.load()` | Reads and fully validates the file. Returns a copy of the document. Throws `missing` if the file does not exist. |
 | `store.createUser({ displayName, role = 'member', id? })` | Adds an enabled user with no credentials. The first user must be the `owner`, and creating it creates the file. A second owner is refused. |
 | `store.addCredential(userId, { id, publicKey, counter = 0, transports = [], label = '' })` | Registers a credential for an enabled user. The credential id must not exist for any user. |
@@ -109,6 +109,8 @@ const hit = findCredential(data, credential.id); // { user, credential } or null
 | `findUser(data, userId)` / `findCredential(data, credentialId)` | Pure lookups over a loaded document. They return `null` when nothing matches. |
 | `validateIdentityData(data)` | Validates a whole document (used by `load()` and before every write). |
 | `assertOutsideRoot(file, root)` | The path check used by the store and the serve config. |
+
+The API is synchronous. A change that finds the lock busy blocks the calling thread until the lock frees up or `lockWaitMs` passes (5 seconds by default). In `serve.mjs` that blocks the event loop, so passkey sign-in (#8) should keep changes such as `updateCounter` off the hot path, or account for the wait. `load()` takes no lock and does not wait.
 
 Every function returns plain copies. Changing a returned object does not change the store. Callers decide policy: for example, sign-in code must check `user.disabled` after `findCredential()`.
 
@@ -127,6 +129,6 @@ Failures throw `IdentityStoreError` with a stable `code`:
 | `user_disabled` | Adding a credential to, or updating a counter for, a disabled user. |
 | `counter_regression` | The signature counter did not increase. |
 | `unsafe_path` / `unsafe_file` / `unsafe_permissions` | The path is inside the root, the file is a symlink or not a regular file, or the file has the wrong owner or mode. |
-| `store_busy` | Another writer held the lock for more than 5 seconds. |
+| `store_busy` | Another writer held the lock for longer than `lockWaitMs` (5 seconds by default). |
 | `invalid_argument` | A bad argument to an API call. |
 | `unreadable` | The file exists but could not be read. |

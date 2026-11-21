@@ -51,8 +51,8 @@ const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
 const TRANSPORT_RE = /^[a-z][a-z0-9-]{0,31}$/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
-const LOCK_WAIT_MS = 5000;
-const LOCK_STALE_MS = 30000;
+const DEFAULT_LOCK_WAIT_MS = 5000;
+const DEFAULT_LOCK_STALE_MS = 30000;
 const CHECK_MODE = process.platform !== 'win32';
 
 const STORE_KEYS = ['schema_version', 'users'];
@@ -411,8 +411,8 @@ const ensureDir = (dir) => {
   if (!fs.statSync(dir).isDirectory()) fail('Identity store directory is not a directory', 'unsafe_path');
 };
 
-const withLock = (lockDir, fn) => {
-  const deadline = Date.now() + LOCK_WAIT_MS;
+const withLock = (lockDir, { waitMs, staleMs }, fn) => {
+  const deadline = Date.now() + waitMs;
   for (;;) {
     try {
       fs.mkdirSync(lockDir, { mode: 0o700 });
@@ -421,9 +421,9 @@ const withLock = (lockDir, fn) => {
       if (error.code !== 'EEXIST') fail('Cannot take the identity store lock', 'store_busy');
     }
     try {
-      // A lock older than LOCK_STALE_MS is presumed abandoned; locks are held
-      // only for one read-modify-write.
-      if (Date.now() - fs.statSync(lockDir).mtimeMs > LOCK_STALE_MS) {
+      // A lock older than staleMs is presumed abandoned; locks are held only
+      // for one read-modify-write.
+      if (Date.now() - fs.statSync(lockDir).mtimeMs > staleMs) {
         fs.rmSync(lockDir, { recursive: true, force: true });
         continue;
       }
@@ -450,23 +450,36 @@ const clone = (value) => structuredClone(value);
  *
  * Every method returns plain copies; mutating them does not change the store.
  *
+ * The API is synchronous. A mutator waits for the write lock by blocking the
+ * thread (up to `lockWaitMs`, 5 s by default), so a server should keep
+ * mutators off latency-sensitive request paths such as sign-in, or account
+ * for that wait.
+ *
  * @param {object} options
  * @param {string} options.file Absolute path of the store file (outside root).
  * @param {string} options.root Served Cockpit root.
  * @param {() => number} [options.now] Clock for created_at (tests).
+ * @param {number} [options.lockWaitMs] How long a mutator waits for a busy lock before throwing "store_busy".
+ * @param {number} [options.lockStaleMs] Age after which a lock is presumed abandoned and taken over.
  * @returns {IdentityStore}
  */
-export const openIdentityStore = ({ file, root, now = Date.now } = {}) => {
+export const openIdentityStore = ({
+  file, root, now = Date.now, lockWaitMs = DEFAULT_LOCK_WAIT_MS, lockStaleMs = DEFAULT_LOCK_STALE_MS,
+} = {}) => {
   if (typeof root !== 'string' || root === '') fail('openIdentityStore requires the served root', 'invalid_argument');
+  for (const [name, value] of [['lockWaitMs', lockWaitMs], ['lockStaleMs', lockStaleMs]]) {
+    if (!Number.isFinite(value) || value < 0) fail(`${name} must be a non-negative number of milliseconds`, 'invalid_argument');
+  }
   const storeFile = path.resolve(assertOutsideRoot(file, root));
   const lockDir = `${storeFile}.lock`;
+  const lockOptions = { waitMs: lockWaitMs, staleMs: lockStaleMs };
 
   // Read, transform, validate, and atomically write under the lock. A missing
   // file starts from an empty document only for createUser (bootstrap).
   const mutate = (transform, { allowMissing = false } = {}) => {
     assertOutsideRoot(storeFile, root);
     ensureDir(path.dirname(storeFile));
-    return withLock(lockDir, () => {
+    return withLock(lockDir, lockOptions, () => {
       let current;
       try {
         current = readStoreFile(storeFile);

@@ -397,6 +397,22 @@ test('a stale lock left by a crashed writer is cleared', () => {
   assert.equal(store.load().users.length, 3);
 });
 
+test('a fresh lock held by another writer makes mutators throw store_busy after the wait', () => {
+  const { file, root, store } = seeded();
+  const before = fs.readFileSync(file);
+  const lockDir = `${file}.lock`;
+  fs.mkdirSync(lockDir);
+  const busy = openIdentityStore({ file, root, lockWaitMs: 50 });
+  const started = Date.now();
+  assertRejects(() => busy.createUser({ displayName: 'Test Member Two' }), 'store_busy');
+  assert.ok(Date.now() - started < 2000, 'the shortened wait is honored');
+  assert.deepEqual(fs.readFileSync(file), before);
+  assert.equal(fs.existsSync(lockDir), true, 'the other writer keeps its lock');
+  assert.equal(store.load().users.length, 2, 'reads do not need the lock');
+  assertRejects(() => openIdentityStore({ file, root, lockWaitMs: -1 }), 'invalid_argument');
+  assertRejects(() => openIdentityStore({ file, root, lockStaleMs: Number.NaN }), 'invalid_argument');
+});
+
 test('the store path must resolve outside the served root', () => {
   const { base, root } = makeLayout();
   assertRejects(() => openIdentityStore({ file: path.join(root, 'identity.json'), root }), 'unsafe_path');
