@@ -85,6 +85,11 @@ const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
 
 // ---------------------------------------------------------------------------
 // Field validation. Messages cite `at` (a field path), never the value.
+// Checks take an error code: on-disk data fails with the default
+// "invalid_store", caller input with ARG ("invalid_argument"), so callers can
+// tell bad client input from a corrupt store.
+
+const ARG = 'invalid_argument';
 
 const checkKeys = (value, allowed, at) => {
   if (!isPlainObject(value)) fail(`${at} must be an object`);
@@ -92,12 +97,12 @@ const checkKeys = (value, allowed, at) => {
   for (const key of Object.keys(value)) if (!allowed.includes(key)) fail(`${at} has an unknown field`);
 };
 
-const checkText = (value, { at, min, max }) => {
-  if (typeof value !== 'string') fail(`${at} must be a string`);
-  if (value !== value.trim()) fail(`${at} must not start or end with whitespace`);
-  if ([...value].length < min || [...value].length > max) fail(`${at} must be ${min} to ${max} characters`);
-  if (CONTROL_RE.test(value)) fail(`${at} must not contain control characters`);
-  if (FORMAT_RE.test(value)) fail(`${at} must not contain bidirectional or invisible formatting characters`);
+const checkText = (value, { at, min, max, code }) => {
+  if (typeof value !== 'string') fail(`${at} must be a string`, code);
+  if (value !== value.trim()) fail(`${at} must not start or end with whitespace`, code);
+  if ([...value].length < min || [...value].length > max) fail(`${at} must be ${min} to ${max} characters`, code);
+  if (CONTROL_RE.test(value)) fail(`${at} must not contain control characters`, code);
+  if (FORMAT_RE.test(value)) fail(`${at} must not contain bidirectional or invisible formatting characters`, code);
   return value;
 };
 
@@ -109,11 +114,11 @@ const checkTimestamp = (value, at) => {
 };
 
 // Canonical unpadded base64url: decoding and re-encoding gives the same text.
-const checkBase64url = (value, { at, maxBytes }) => {
-  if (typeof value !== 'string' || value === '' || !BASE64URL_RE.test(value)) fail(`${at} must be non-empty unpadded base64url`);
+const checkBase64url = (value, { at, maxBytes, code }) => {
+  if (typeof value !== 'string' || value === '' || !BASE64URL_RE.test(value)) fail(`${at} must be non-empty unpadded base64url`, code);
   const bytes = Buffer.from(value, 'base64url');
-  if (bytes.length === 0 || bytes.toString('base64url') !== value) fail(`${at} must be canonical unpadded base64url`);
-  if (bytes.length > maxBytes) fail(`${at} must decode to at most ${maxBytes} bytes`);
+  if (bytes.length === 0 || bytes.toString('base64url') !== value) fail(`${at} must be canonical unpadded base64url`, code);
+  if (bytes.length > maxBytes) fail(`${at} must decode to at most ${maxBytes} bytes`, code);
   return bytes;
 };
 
@@ -127,24 +132,24 @@ const checkRole = (value, at) => {
   return value;
 };
 
-const checkCounter = (value, at) => {
-  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_COUNTER) fail(`${at} must be an integer from 0 to ${MAX_COUNTER}`);
+const checkCounter = (value, at, code) => {
+  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_COUNTER) fail(`${at} must be an integer from 0 to ${MAX_COUNTER}`, code);
   return value;
 };
 
-const checkTransports = (value, at) => {
-  if (!Array.isArray(value) || value.length > MAX_TRANSPORTS) fail(`${at} must be an array of at most ${MAX_TRANSPORTS} strings`);
+const checkTransports = (value, at, code) => {
+  if (!Array.isArray(value) || value.length > MAX_TRANSPORTS) fail(`${at} must be an array of at most ${MAX_TRANSPORTS} strings`, code);
   value.forEach((transport, index) => {
-    if (typeof transport !== 'string' || !TRANSPORT_RE.test(transport)) fail(`${at}[${index}] must be a lowercase transport name such as usb, nfc, ble, hybrid, or internal`);
+    if (typeof transport !== 'string' || !TRANSPORT_RE.test(transport)) fail(`${at}[${index}] must be a lowercase transport name such as usb, nfc, ble, hybrid, or internal`, code);
   });
-  if (new Set(value).size !== value.length) fail(`${at} must not repeat a transport`);
+  if (new Set(value).size !== value.length) fail(`${at} must not repeat a transport`, code);
   return value;
 };
 
-const checkPublicKey = (value, at) => {
-  const bytes = checkBase64url(value, { at, maxBytes: MAX_PUBLIC_KEY_BYTES });
+const checkPublicKey = (value, at, code) => {
+  const bytes = checkBase64url(value, { at, maxBytes: MAX_PUBLIC_KEY_BYTES, code });
   // A COSE_Key is a CBOR map (major type 5). Full decoding is the verifier's job.
-  if (bytes[0] >> 5 !== 5) fail(`${at} must be a COSE key (CBOR map)`);
+  if (bytes[0] >> 5 !== 5) fail(`${at} must be a COSE key (CBOR map)`, code);
   return value;
 };
 
@@ -210,14 +215,15 @@ const nowIso = (now) => new Date(now()).toISOString();
 
 const toBase64url = (value, at, maxBytes) => {
   if (value instanceof Uint8Array) {
-    if (value.length === 0) fail(`${at} must not be empty`, 'invalid_argument');
+    if (value.length === 0) fail(`${at} must not be empty`, ARG);
+    if (value.length > maxBytes) fail(`${at} must be at most ${maxBytes} bytes`, ARG);
     return Buffer.from(value).toString('base64url');
   }
   if (typeof value === 'string') {
-    checkBase64url(value, { at, maxBytes });
+    checkBase64url(value, { at, maxBytes, code: ARG });
     return value;
   }
-  return fail(`${at} must be a Uint8Array or a base64url string`, 'invalid_argument');
+  return fail(`${at} must be a Uint8Array or a base64url string`, ARG);
 };
 
 const userIndexOf = (data, userId) => {
@@ -241,7 +247,7 @@ const replaceUser = (data, userIndex, user) => ({
 
 const applyCreateUser = (data, { id, displayName, role, now }) => {
   const userId = id === undefined ? newUserId() : checkUserId(id, 'id');
-  checkText(displayName, { at: 'displayName', min: 1, max: MAX_DISPLAY_NAME });
+  checkText(displayName, { at: 'displayName', min: 1, max: MAX_DISPLAY_NAME, code: ARG });
   checkRole(role, 'role');
   if (data.users.some((user) => user.id === userId)) fail('A user with that id already exists', 'duplicate_id');
   if (role === 'owner' && data.users.some((user) => user.role === 'owner')) fail('The store already has an owner; exactly one owner is allowed', 'owner_required');
@@ -256,11 +262,11 @@ const applyAddCredential = (data, userId, { id, publicKey, counter = 0, transpor
   if (user.disabled) fail('Cannot add a credential to a disabled user', 'user_disabled');
   const credential = {
     id: toBase64url(id, 'credential id', MAX_CREDENTIAL_ID_BYTES),
-    public_key: toBase64url(publicKey, 'publicKey', MAX_PUBLIC_KEY_BYTES),
-    counter: checkCounter(counter, 'counter'),
-    transports: [...checkTransports(transports, 'transports')],
+    public_key: checkPublicKey(toBase64url(publicKey, 'publicKey', MAX_PUBLIC_KEY_BYTES), 'publicKey', ARG),
+    counter: checkCounter(counter, 'counter', ARG),
+    transports: [...checkTransports(transports, 'transports', ARG)],
     created_at: nowIso(now),
-    label: checkText(label, { at: 'label', min: 0, max: MAX_LABEL }),
+    label: checkText(label, { at: 'label', min: 0, max: MAX_LABEL, code: ARG }),
   };
   if (data.users.some((existing) => existing.credentials.some((other) => other.id === credential.id))) {
     fail('That credential id is already registered', 'duplicate_id');
@@ -272,7 +278,7 @@ const applyAddCredential = (data, userId, { id, publicKey, counter = 0, transpor
 // WebAuthn signature counters only move forward. Authenticators that do not
 // implement a counter always report 0; 0 -> 0 is accepted as a no-op.
 const applyUpdateCounter = (data, credentialId, counter) => {
-  checkCounter(counter, 'counter');
+  checkCounter(counter, 'counter', ARG);
   const { userIndex, credentialIndex } = credentialPosition(data, credentialId);
   const user = data.users[userIndex];
   const credential = user.credentials[credentialIndex];
@@ -611,9 +617,9 @@ const clone = (value) => structuredClone(value);
 export const openIdentityStore = ({
   file, root, now = Date.now, lockWaitMs = DEFAULT_LOCK_WAIT_MS, lockStaleMs = DEFAULT_LOCK_STALE_MS,
 } = {}) => {
-  if (typeof root !== 'string' || root === '') fail('openIdentityStore requires the served root', 'invalid_argument');
+  if (typeof root !== 'string' || root === '') fail('openIdentityStore requires the served root', ARG);
   for (const [name, value] of [['lockWaitMs', lockWaitMs], ['lockStaleMs', lockStaleMs]]) {
-    if (!Number.isFinite(value) || value < 0) fail(`${name} must be a non-negative number of milliseconds`, 'invalid_argument');
+    if (!Number.isFinite(value) || value < 0) fail(`${name} must be a non-negative number of milliseconds`, ARG);
   }
   const storeFile = path.resolve(assertOutsideRoot(file, root));
   const lockFile = `${storeFile}.lock`;

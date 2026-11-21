@@ -158,9 +158,9 @@ test('display names and labels reject bidi and invisible formatting characters',
   const sneaky = ['‎', '‏', '‪', '‫', '‬', '‭', '‮', '⁦', '⁧', '⁨', '⁩', '​', '‌', '‍', '⁠', '﻿', '؜'];
   for (const char of sneaky) {
     const hex = char.codePointAt(0).toString(16);
-    const error = assertRejects(() => store.createUser({ displayName: `Test${char}Member` }), 'invalid_store');
+    const error = assertRejects(() => store.createUser({ displayName: `Test${char}Member` }), 'invalid_argument');
     assert.match(error.message, /bidirectional or invisible formatting/, hex);
-    assertRejects(() => store.addCredential(owner.id, credential({ label: `Phone${char}` })), 'invalid_store');
+    assertRejects(() => store.addCredential(owner.id, credential({ label: `Phone${char}` })), 'invalid_argument');
   }
   assert.equal(store.createUser({ displayName: 'Zoë Ünïcode 測試' }).display_name, 'Zoë Ünïcode 測試');
 
@@ -205,12 +205,14 @@ test('addCredential rejects duplicate ids across users and bad input without ech
   assertRejects(() => store.addCredential(member.id, credential({ id: input.id })), 'duplicate_id', secrets);
   assertRejects(() => store.addCredential(owner.id, credential({ id })), 'duplicate_id', secrets);
   assertRejects(() => store.addCredential('usr_nobody0000', credential()), 'not_found');
-  assertRejects(() => store.addCredential(owner.id, credential({ id: `${id}=` })), 'invalid_store', secrets);
-  assertRejects(() => store.addCredential(owner.id, credential({ id: 'not base64!' })), 'invalid_store', secrets);
+  assertRejects(() => store.addCredential(owner.id, credential({ id: `${id}=` })), 'invalid_argument', secrets);
+  assertRejects(() => store.addCredential(owner.id, credential({ id: 'not base64!' })), 'invalid_argument', secrets);
+  assertRejects(() => store.addCredential(owner.id, credential({ id: 'A'.repeat(1400) })), 'invalid_argument');
   assertRejects(() => store.addCredential(owner.id, credential({ id: new Uint8Array(0) })), 'invalid_argument');
   assertRejects(() => store.addCredential(owner.id, credential({ id: 12345 })), 'invalid_argument');
   assertRejects(() => store.addCredential(owner.id, credential({ id: crypto.randomBytes(1024) })));
-  assertRejects(() => store.addCredential(owner.id, credential({ publicKey: crypto.randomBytes(32).fill(0x04, 0, 1) })), 'invalid_store', secrets);
+  assertRejects(() => store.addCredential(owner.id, credential({ publicKey: crypto.randomBytes(32).fill(0x04, 0, 1) })), 'invalid_argument', secrets);
+  assertRejects(() => store.addCredential(owner.id, credential({ publicKey: Buffer.from([0x04, 1, 2]).toString('base64url') })), 'invalid_argument');
   assertRejects(() => store.addCredential(owner.id, credential({ counter: -1 })));
   assertRejects(() => store.addCredential(owner.id, credential({ counter: 1.5 })));
   assertRejects(() => store.addCredential(owner.id, credential({ transports: ['USB'] })));

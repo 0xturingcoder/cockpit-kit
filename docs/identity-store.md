@@ -123,7 +123,7 @@ Failures throw `IdentityStoreError` with a stable `code`:
 | Code | Meaning |
 | --- | --- |
 | `missing` | The file does not exist yet. |
-| `invalid_store` | Invalid JSON, a missing or unknown field, a value out of range, or a file larger than 1 MiB. |
+| `invalid_store` | The file on disk is bad: invalid JSON, a missing or unknown field, a value out of range, or a file larger than 1 MiB. |
 | `store_full` | The change would make the file larger than 1 MiB. Nothing was written. |
 | `unsupported_schema` | `schema_version` is not `1`. |
 | `invalid_id` / `invalid_role` | A malformed user id, or a role other than `owner` / `member`. |
@@ -134,5 +134,5 @@ Failures throw `IdentityStoreError` with a stable `code`:
 | `counter_regression` | The signature counter did not increase. |
 | `unsafe_path` / `unsafe_file` / `unsafe_permissions` | The path is inside the root or its directory is a symlink; the file is a symlink or not a regular file; or the file has the wrong owner or mode, or its directory is writable by group or others. |
 | `store_busy` | Another writer held the lock for longer than `lockWaitMs` (5 seconds by default). |
-| `invalid_argument` | A bad argument to an API call. |
+| `invalid_argument` | A bad argument to an API call, such as a malformed base64url credential id or public key, a counter out of range, or a display name or label that breaks the field rules. This is bad caller (client) input, not a corrupt store. |
 | `unreadable` | The file exists but could not be opened or read (for example, permission denied). |
