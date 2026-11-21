@@ -89,17 +89,17 @@ Every passkey request must be a `POST` with `Content-Type: application/json`, a 
 - Single use: the first `consume()` removes the challenge before any check, so a failed attempt uses it up too.
 - Short TTL: 2 minutes. The same value is sent as the ceremony `timeout`.
 - Bound to the ceremony (`registration` or `authentication`) and, for registration, to the user.
-- Bounded: at most 64 pending. When full, new options requests get `503 too_many_challenges` instead of evicting a live ceremony; the options rate limit keeps this from happening in normal use.
+- Bounded per ceremony: at most 64 pending sign-in challenges and, separately, 64 pending registration challenges. When a ceremony is full, its new options requests get `503 too_many_challenges` instead of evicting a live ceremony. Because the limits are separate, anonymous sign-in requests cannot use up the slots that operator registration needs.
 - A server restart drops every pending ceremony.
 
 ## Rate limits
 
-Shared token buckets (a loopback server behind a proxy cannot tell clients apart without trusting forwarded headers):
+Token buckets shared by all clients (a loopback server behind a proxy cannot tell clients apart without trusting forwarded headers). Sign-in and registration each have their own pair:
 
-- Options requests (registration and sign-in): 10 at once, refilling at 30 per minute.
-- Failed verifications (registration and sign-in): 10 at once, refilling at 10 per minute. While empty, every verify request gets `429 rate_limited` with `Retry-After`.
+- Options requests: 10 at once, refilling at 30 per minute.
+- Failed verifications: 10 at once, refilling at 10 per minute. While empty, every verify request for that ceremony gets `429 rate_limited` with `Retry-After`.
 
-Because the buckets are shared, someone who can reach the server can keep passkey sign-in rate limited. The tokenized URL still works as a fallback.
+Because the sign-in buckets are shared, someone who can reach the server can keep passkey sign-in rate limited. The tokenized URL still works as a fallback, and operator registration is unaffected because it draws on its own buckets.
 
 ## Errors
 

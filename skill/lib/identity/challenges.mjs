@@ -1,10 +1,13 @@
 // Server-side WebAuthn challenges: random, single use, short-lived, bound to
 // one ceremony (and, for registration, to the user being registered), and
-// bounded in number. In memory only: a restart drops every pending ceremony.
+// bounded in number per ceremony. In memory only: a restart drops every
+// pending ceremony.
 import crypto from 'node:crypto';
 
 export const CHALLENGE_BYTES = 32;
 export const DEFAULT_CHALLENGE_TTL_MS = 2 * 60 * 1000;
+// Per ceremony, so anonymous sign-in traffic cannot use up the slots that
+// operator registration needs.
 export const DEFAULT_MAX_CHALLENGES = 64;
 export const CEREMONIES = Object.freeze(['registration', 'authentication']);
 
@@ -31,9 +34,10 @@ const HANDLE_RE = /^[A-Za-z0-9_-]{43}$/;
  * `issue()` returns an opaque handle (`id`) for the client to send back and
  * the challenge bytes for the browser. `consume()` removes the entry on the
  * first attempt, whatever the outcome, so a challenge can be used at most
- * once. Expired entries are swept on every call; when `max` entries are
- * still pending, `issue()` refuses with "too_many_challenges" rather than
- * evicting a live ceremony.
+ * once. Expired entries are swept on every call; when `max` entries for the
+ * same ceremony are still pending, `issue()` refuses with
+ * "too_many_challenges" rather than evicting a live ceremony. Each ceremony
+ * has its own `max`, so a full sign-in ceremony never blocks registration.
  *
  * @param {{ ttlMs?: number, max?: number, now?: () => number }} [options]
  */
@@ -45,6 +49,12 @@ export const createChallengeStore = ({ ttlMs = DEFAULT_CHALLENGE_TTL_MS, max = D
     for (const [id, entry] of pending) if (entry.expiresAt <= at) pending.delete(id);
   };
 
+  const pendingFor = (ceremony) => {
+    let count = 0;
+    for (const entry of pending.values()) if (entry.ceremony === ceremony) count += 1;
+    return count;
+  };
+
   /**
    * @param {{ ceremony: 'registration' | 'authentication', binding?: object }} input
    *   `binding` is stored with the challenge and returned by consume(), e.g.
@@ -54,7 +64,7 @@ export const createChallengeStore = ({ ttlMs = DEFAULT_CHALLENGE_TTL_MS, max = D
     if (!CEREMONIES.includes(ceremony)) throw new TypeError('unknown ceremony');
     const at = now();
     sweep(at);
-    if (pending.size >= max) throw new ChallengeError('too_many_challenges');
+    if (pendingFor(ceremony) >= max) throw new ChallengeError('too_many_challenges');
     const id = crypto.randomBytes(32).toString('base64url');
     const challenge = crypto.randomBytes(CHALLENGE_BYTES);
     const entry = Object.freeze({ ceremony, challenge, binding: binding && Object.freeze({ ...binding }), expiresAt: at + ttlMs });
@@ -77,5 +87,5 @@ export const createChallengeStore = ({ ttlMs = DEFAULT_CHALLENGE_TTL_MS, max = D
     return Object.freeze({ challenge: Buffer.from(entry.challenge), binding: entry.binding });
   };
 
-  return Object.freeze({ issue, consume, ttlMs, size: () => pending.size });
+  return Object.freeze({ issue, consume, ttlMs, size: (ceremony) => (ceremony === undefined ? pending.size : pendingFor(ceremony)) });
 };

@@ -12,11 +12,14 @@ export const PASSKEY_PREFIX = '/auth/passkey';
 const BODY_LIMIT = 64 * 1024;
 const BODY_TIMEOUT_MS = 10000;
 // Token buckets, shared by all clients: a loopback server behind a proxy
-// cannot tell clients apart without trusting forwarded headers.
+// cannot tell clients apart without trusting forwarded headers. Sign-in and
+// registration have separate buckets, so anonymous sign-in traffic cannot
+// rate-limit the operator out of adding a passkey.
 const RATES = Object.freeze({
   options: { perMinute: 30, burst: 10 },
   failures: { perMinute: 10, burst: 10 },
 });
+const CEREMONY_BUCKETS = Object.freeze(['login', 'register']);
 
 export const PASSKEY_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
@@ -172,10 +175,10 @@ const challengeIssueError = (error) => (error instanceof ChallengeError
  * @param {() => number} [options.now] Clock for rate limits (tests).
  */
 export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSignIn, log = () => {}, now = Date.now }) => {
-  const buckets = {
+  const buckets = Object.fromEntries(CEREMONY_BUCKETS.map((ceremony) => [ceremony, {
     options: createBucket(RATES.options, now),
     failures: createBucket(RATES.failures, now),
-  };
+  }]));
 
   const checkRequest = (req) => {
     const origin = req.headers.origin;
@@ -199,13 +202,13 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
     return { challengeId: body.challenge_id, response: body.credential };
   };
 
-  // Run a verification step; failures spend a rate-limit token.
-  const attempt = (fn, mapError) => {
-    buckets.failures.check();
+  // Run a verification step; failures spend a token from that ceremony's bucket.
+  const attempt = (bucket, fn, mapError) => {
+    bucket.check();
     try {
       return fn();
     } catch (error) {
-      buckets.failures.spend();
+      bucket.spend();
       const mapped = mapError(error);
       if (mapped instanceof HttpError) log(`passkey ${mapped.code}${error.code && error.code !== mapped.code ? ` (${error.code})` : ''}`);
       throw mapped;
@@ -216,7 +219,7 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
     '/register/options': async (req) => {
       checkRequest(req);
       requireOperator(req);
-      buckets.options.take();
+      buckets.register.options.take();
       const body = parseJson(await readBody(req));
       try {
         const options = ceremonies.startRegistration({ displayName: body.display_name });
@@ -231,12 +234,12 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
       const body = parseJson(await readBody(req));
       const fields = verifyFields(body);
       const label = body.label === undefined ? '' : body.label;
-      const result = attempt(() => ceremonies.finishRegistration({ ...fields, label }), registrationError);
+      const result = attempt(buckets.register.failures, () => ceremonies.finishRegistration({ ...fields, label }), registrationError);
       return { status: 201, body: { registered: true, user_id: result.userId, credential_id: result.credentialId, created_owner: result.createdOwner } };
     },
     '/login/options': async (req) => {
       checkRequest(req);
-      buckets.options.take();
+      buckets.login.options.take();
       parseJson(await readBody(req));
       let options;
       try {
@@ -249,7 +252,7 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
     '/login/verify': async (req) => {
       const origin = checkRequest(req);
       const fields = verifyFields(parseJson(await readBody(req)));
-      const result = attempt(() => ceremonies.finishAuthentication(fields), signInError);
+      const result = attempt(buckets.login.failures, () => ceremonies.finishAuthentication(fields), signInError);
       const headers = onSignIn(result, { origin });
       return { status: 200, body: { signed_in: true, user_id: result.userId }, headers };
     },

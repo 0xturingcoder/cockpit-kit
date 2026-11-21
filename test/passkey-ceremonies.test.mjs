@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ChallengeError, createChallengeStore } from '../skill/lib/identity/challenges.mjs';
+import { ChallengeError, DEFAULT_MAX_CHALLENGES, createChallengeStore } from '../skill/lib/identity/challenges.mjs';
 import { PasskeyError, createPasskeyCeremonies } from '../skill/lib/identity/passkeys.mjs';
 import { IdentityStoreError, openIdentityStore } from '../skill/lib/identity/store.mjs';
 import { WebAuthnError, parseCoseKey, verifyAuthentication } from '../skill/lib/identity/webauthn.mjs';
@@ -115,6 +115,15 @@ test('challenges are bounded in number; expired ones free their slots', () => {
   assert.equal(challenges.size(), 1);
 });
 
+test('challenge limits are per ceremony: a full sign-in ceremony does not block registration', () => {
+  const challenges = createChallengeStore({ max: 3 });
+  for (let i = 0; i < 3; i += 1) challenges.issue({ ceremony: 'authentication' });
+  assert.throws(() => challenges.issue({ ceremony: 'authentication' }), errorCode(ChallengeError, 'too_many_challenges'));
+  for (let i = 0; i < 3; i += 1) challenges.issue({ ceremony: 'registration', binding: { userId: 'usr_example0001' } });
+  assert.throws(() => challenges.issue({ ceremony: 'registration' }), errorCode(ChallengeError, 'too_many_challenges'));
+  assert.deepEqual([challenges.size('authentication'), challenges.size('registration'), challenges.size()], [3, 3, 6]);
+});
+
 test('registration challenges carry their user binding, frozen', () => {
   const challenges = createChallengeStore();
   const issued = challenges.issue({ ceremony: 'registration', binding: { userId: 'usr_example0001', createOwner: false } });
@@ -168,6 +177,14 @@ test('ceremony: sign-in options are usernameless and require user verification',
   assert.deepEqual(options.publicKey.allowCredentials, []);
   assert.equal(options.publicKey.userVerification, 'required');
   assert.equal(options.publicKey.rpId, RP_ID);
+});
+
+test('ceremony: sign-in options filling the default challenge limit do not block owner registration', () => {
+  const h = harness();
+  for (let i = 0; i < DEFAULT_MAX_CHALLENGES; i += 1) h.ceremonies.startAuthentication();
+  assert.throws(() => h.ceremonies.startAuthentication(), errorCode(ChallengeError, 'too_many_challenges'));
+  const { result } = h.registerOwner(makeCredential());
+  assert.equal(result.createdOwner, true);
 });
 
 test('ceremony: creating the owner requires a display name', () => {

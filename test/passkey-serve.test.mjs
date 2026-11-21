@@ -8,7 +8,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
+import { DEFAULT_MAX_CHALLENGES } from '../skill/lib/identity/challenges.mjs';
 import { createPasskeyApi } from '../skill/lib/identity/passkey-http.mjs';
+import { createPasskeyCeremonies } from '../skill/lib/identity/passkeys.mjs';
 import { IdentityStoreError, openIdentityStore } from '../skill/lib/identity/store.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
 import { writeConfig } from '../skill/lib/config.mjs';
@@ -82,6 +84,56 @@ test('http: requests need an exact allowed Origin, same-origin fetch metadata, J
   assert.equal((await fakeRequest('/auth/passkey/nope')).status, 404);
   const big = await fakeRequest('/auth/passkey/login/options', { body: JSON.stringify({ pad: 'x'.repeat(70 * 1024) }) });
   assert.equal(big.status, 413);
+});
+
+test('http: draining sign-in rate limits and challenge slots does not starve operator registration', async () => {
+  const base = tempDir('cockpit-passkeys-http-');
+  const root = path.join(base, 'root');
+  fs.mkdirSync(root);
+  const store = openIdentityStore({ file: path.join(base, 'state', 'identity.json'), root });
+  const ceremonies = createPasskeyCeremonies({ store, rpId: 'example.com', origins: [ORIGIN] });
+  // The rate-limit clock is separate from the challenge clock, so refilling
+  // tokens does not expire the challenges already issued.
+  let at = 0;
+  const operatorCookie = 'operator';
+  fakeRequest.api = createPasskeyApi({
+    ceremonies,
+    allowedOrigins: () => [ORIGIN],
+    isOperator: (req) => req.headers.cookie === operatorCookie,
+    onSignIn: () => ({}),
+    now: () => at,
+  });
+
+  // Hold every sign-in challenge slot (refilling the bucket as needed).
+  let issued = 0;
+  for (;;) {
+    at += 2000;
+    const res = await fakeRequest('/auth/passkey/login/options');
+    if (res.status === 503) {
+      assert.equal(res.body.error.code, 'too_many_challenges');
+      break;
+    }
+    assert.equal(res.status, 200);
+    issued += 1;
+  }
+  assert.equal(issued, DEFAULT_MAX_CHALLENGES);
+  // Then empty the sign-in options and failure buckets.
+  const statuses = [];
+  for (let i = 0; i < 11; i += 1) statuses.push((await fakeRequest('/auth/passkey/login/options')).status);
+  assert.equal(statuses.at(-1), 429);
+  const badSignIn = JSON.stringify({ challenge_id: 'x'.repeat(43), credential: { rawId: 'AAAA' } });
+  for (let i = 0; i < 10; i += 1) assert.equal((await fakeRequest('/auth/passkey/login/verify', { body: badSignIn })).status, 401);
+  assert.equal((await fakeRequest('/auth/passkey/login/verify', { body: badSignIn })).status, 429);
+
+  // Operator registration still gets options and completes.
+  const options = await fakeRequest('/auth/passkey/register/options', { body: JSON.stringify({ display_name: 'Ada Example' }), headers: { Cookie: operatorCookie } });
+  assert.equal(options.status, 200, JSON.stringify(options.body));
+  const response = registrationResponse({ credential: makeCredential(), challenge: Buffer.from(options.body.publicKey.challenge, 'base64url'), rpId: 'example.com', origin: ORIGIN });
+  const verify = await fakeRequest('/auth/passkey/register/verify', { body: JSON.stringify({ challenge_id: options.body.challenge_id, credential: response }), headers: { Cookie: operatorCookie } });
+  assert.equal(verify.status, 201, JSON.stringify(verify.body));
+  assert.equal(verify.body.created_owner, true);
+  // Sign-in stays limited.
+  assert.equal((await fakeRequest('/auth/passkey/login/options')).status, 429);
 });
 
 // ---------------------------------------------------------------------------
