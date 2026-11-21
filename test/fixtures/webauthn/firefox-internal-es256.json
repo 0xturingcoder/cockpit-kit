@@ -6,25 +6,25 @@
     "authenticator": "Firefox virtual authenticator, platform (internal), ES256",
     "captured": "2026-11-21",
     "method": "Recorded from a real Mozilla Firefox browser calling navigator.credentials.create() and get() on https://example.com (routed to a local test server). The authenticator is Firefox's WebDriver virtual authenticator (WebDriver WebAuthn extension via geckodriver, CTAP2, transport internal, user verification on), not a physical device. Firefox prefs: security.webauth.webauthn_enable_softtoken=true, security.webauth.webauthn_enable_usbtoken=false.",
-    "notes": "Invented user (Ada Example). Random user id and challenges generated for the capture. No real origins or identifiers."
+    "notes": "Invented user (Ada Example). Random user id and challenges generated for the capture. The first sign-in lists the credential in allowCredentials; the second is usernameless (empty allowCredentials), as the server does. No real origins or identifiers."
   },
   "rp_id": "example.com",
   "origin": "https://example.com",
   "user": {
-    "id": "L8QwBGpwKAcjmcykegUiYQ",
+    "id": "sVtBPaOOUGWHsN18LJdvCw",
     "name": "ada.example",
     "display_name": "Ada Example"
   },
   "registration": {
-    "challenge": "TPo0ylFc0Aa77qGODRi22Lybxctfx70_dHOfCcvof7U",
+    "challenge": "UJhBtsqN5Dbg1SubB9O0NpHRHX71vREz27Y_jl5wWqY",
     "response": {
       "authenticatorAttachment": "platform",
       "clientExtensionResults": {},
-      "id": "OCYJEqSKE8yekvFmKSWX6rARtxIUloZJXt1KI5zYedc",
-      "rawId": "OCYJEqSKE8yekvFmKSWX6rARtxIUloZJXt1KI5zYedc",
+      "id": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+      "rawId": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
       "response": {
-        "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViko3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUdFAAAAAGjhAKULR5EEuFSXqbpRBjgAIDgmCRKkihPMnpLxZikll-qwEbcSFJaGSV7dSiOc2HnXpQECAyYgASFYIAEZw8ZuVh7NeGbQzW7_7LvSujdnw5k7sR7Im1QAjqBEIlggIdXrfgeGPwph2Mf0kQt2Tjmj6uqOJXko3Mb-UaErr7Y",
-        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiVFBvMHlsRmMwQWE3N3FHT0RSaTIyTHlieGN0Zng3MF9kSE9mQ2N2b2Y3VSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+        "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViko3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUdFAAAAAGjhAKULR5EEuFSXqbpRBjgAICwpIZxZamABxu1tQLIf4tOAUQTCfKy1Q47B2V50K_-2pQECAyYgASFYIE-6UpPYNwN0OJ9SsVJTf9ogAdygQc_vmNbYLW6Nmr6BIlggQUoswm6xkE5MvghwAuVYx1ydzG6Ov5NJBzCagHTo_3M",
+        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiVUpoQnRzcU41RGJnMVN1YkI5TzBOcEhSSFg3MXZSRXoyN1lfamw1d1dxWSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
         "transports": [
           "internal"
         ]
@@ -34,33 +34,33 @@
   },
   "authentications": [
     {
-      "challenge": "brRD5DRXGnXpjG2jEUsqXWbfF02vz8B2MVUrqOA4R4w",
+      "challenge": "AH-qUFeLQOmhxAz8pCtzkLheXz8HqTfK1I3e19z-ZjA",
       "response": {
         "authenticatorAttachment": "platform",
         "clientExtensionResults": {},
-        "id": "OCYJEqSKE8yekvFmKSWX6rARtxIUloZJXt1KI5zYedc",
-        "rawId": "OCYJEqSKE8yekvFmKSWX6rARtxIUloZJXt1KI5zYedc",
+        "id": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+        "rawId": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
         "response": {
           "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAQ",
-          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiYnJSRDVEUlhHblhwakcyakVVc3FYV2JmRjAydno4QjJNVlVycU9BNFI0dyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEYCIQCgl77Ko8Ibu734VbnRLX0Ss_rjnRmOXRwE83KElV_t8gIhAP90krTr5Yh3qV6Kn-95WFSa1_xAHqYdh9bFB18VoIaj",
-          "userHandle": "L8QwBGpwKAcjmcykegUiYQ"
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQUgtcVVGZUxRT21oeEF6OHBDdHprTGhlWHo4SHFUZksxSTNlMTl6LVpqQSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEUCIF3AjG7NDIfYMH7oNesaPlror3FMslm4Ng-YUFPmz9K7AiEA50uSZ-Wagw-FI8feWL0LyR0U6GJIgUEPk2GvV5pZcGY",
+          "userHandle": "sVtBPaOOUGWHsN18LJdvCw"
         },
         "type": "public-key"
       }
     },
     {
-      "challenge": "nUWO-7-ZmvZ7_WVoxue1h2yZBFSrQt1Y5Krna7qiYdc",
+      "challenge": "CBFQNJsu1imsKru2Ts9UJC_2Wq88biYf3vxMNZaVGsU",
       "response": {
         "authenticatorAttachment": "platform",
         "clientExtensionResults": {},
-        "id": "OCYJEqSKE8yekvFmKSWX6rARtxIUloZJXt1KI5zYedc",
-        "rawId": "OCYJEqSKE8yekvFmKSWX6rARtxIUloZJXt1KI5zYedc",
+        "id": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+        "rawId": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
         "response": {
-          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAw",
-          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiblVXTy03LVptdlo3X1dWb3h1ZTFoMnlaQkZTclF0MVk1S3JuYTdxaVlkYyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIQCaYt77zjFpRXSldTykOFT_vIMEa-GSkZRZGYoOKgVhpQIgJzG_E1NFQp546E9ggoFCHKLGsxKUF8fW5oFbZkeOhn4",
-          "userHandle": "L8QwBGpwKAcjmcykegUiYQ"
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAg",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQ0JGUU5Kc3UxaW1zS3J1MlRzOVVKQ18yV3E4OGJpWWYzdnhNTlphVkdzVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEUCIQDEIrk8iXo14EdtNKqvzfjR9AXH1yNiuzMozvQtrWh4mgIgKkBKl9muBZNtaPbWGbDBAM0LZQvkaagWNpTkFzAmWLQ",
+          "userHandle": "sVtBPaOOUGWHsN18LJdvCw"
         },
         "type": "public-key"
       }

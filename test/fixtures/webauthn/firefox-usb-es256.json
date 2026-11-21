@@ -6,25 +6,25 @@
     "authenticator": "Firefox virtual authenticator, roaming security key (usb), ES256",
     "captured": "2026-11-21",
     "method": "Recorded from a real Mozilla Firefox browser calling navigator.credentials.create() and get() on https://example.com (routed to a local test server). The authenticator is Firefox's WebDriver virtual authenticator (WebDriver WebAuthn extension via geckodriver, CTAP2, transport usb, user verification on), not a physical device. Firefox prefs: security.webauth.webauthn_enable_softtoken=true, security.webauth.webauthn_enable_usbtoken=false.",
-    "notes": "Invented user (Ada Example). Random user id and challenges generated for the capture. No real origins or identifiers."
+    "notes": "Invented user (Ada Example). Random user id and challenges generated for the capture. The first sign-in lists the credential in allowCredentials; the second is usernameless (empty allowCredentials), as the server does. No real origins or identifiers."
   },
   "rp_id": "example.com",
   "origin": "https://example.com",
   "user": {
-    "id": "vQv-hoYo8yfaHxfnkvwoaw",
+    "id": "U8bD2uKWbJo2mLC5Do8IWw",
     "name": "ada.example",
     "display_name": "Ada Example"
   },
   "registration": {
-    "challenge": "bQzbyLkU10QNMaY1xV042e8mQCrF6Sb8qyPlAUDl29k",
+    "challenge": "iRJDi3KKNzpjjA0deW8jRLgHLRiWlcgQftQwgWWA1xg",
     "response": {
       "authenticatorAttachment": "cross-platform",
       "clientExtensionResults": {},
-      "id": "EIgUgDiSemG-9IjJmG-0Y-p0W3HMp67UaOhqrKPug1I",
-      "rawId": "EIgUgDiSemG-9IjJmG-0Y-p0W3HMp67UaOhqrKPug1I",
+      "id": "qInxaPEAzkMPk6J-uQI5qkTaes2ExWkLl4x3OIMmlG8",
+      "rawId": "qInxaPEAzkMPk6J-uQI5qkTaes2ExWkLl4x3OIMmlG8",
       "response": {
-        "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViko3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUdFAAAAAGjhAKULR5EEuFSXqbpRBjgAIBCIFIA4knphvvSIyZhvtGPqdFtxzKeu1Gjoaqyj7oNSpQECAyYgASFYIHhF9pUw8LsxO7yA4bzwLgJYDik--Nom_pOQEKo5TpCBIlggxGvGdkhxWLMNVax7cV0P1xl0enC-aJQQ1YanlGRzJW4",
-        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiYlF6YnlMa1UxMFFOTWFZMXhWMDQyZThtUUNyRjZTYjhxeVBsQVVEbDI5ayIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+        "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViko3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUdFAAAAAGjhAKULR5EEuFSXqbpRBjgAIKiJ8WjxAM5DD5OifrkCOapE2nrNhMVpC5eMdziDJpRvpQECAyYgASFYIPmV86AhP-TXFTnW8uAXsz2nbMpJaiOWkYHijV4i4QGpIlggVIuhpOHD0T3wa-89NtKQMp1ZG2pJnhfNwAOsk_G60Cs",
+        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiaVJKRGkzS0tOenBqakEwZGVXOGpSTGdITFJpV2xjZ1FmdFF3Z1dXQTF4ZyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
         "transports": [
           "usb"
         ]
@@ -34,33 +34,33 @@
   },
   "authentications": [
     {
-      "challenge": "QCL6gxx9d6P1E78BTnX_YnPGAVCiAE6odv55pJgIN6E",
+      "challenge": "g1f_TqrFSlYLlFnccOJ78KzXm7QkcVjK-W5IvMvDFSs",
       "response": {
         "authenticatorAttachment": "cross-platform",
         "clientExtensionResults": {},
-        "id": "EIgUgDiSemG-9IjJmG-0Y-p0W3HMp67UaOhqrKPug1I",
-        "rawId": "EIgUgDiSemG-9IjJmG-0Y-p0W3HMp67UaOhqrKPug1I",
+        "id": "qInxaPEAzkMPk6J-uQI5qkTaes2ExWkLl4x3OIMmlG8",
+        "rawId": "qInxaPEAzkMPk6J-uQI5qkTaes2ExWkLl4x3OIMmlG8",
         "response": {
           "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAQ",
-          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUUNMNmd4eDlkNlAxRTc4QlRuWF9ZblBHQVZDaUFFNm9kdjU1cEpnSU42RSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIA9BCEIe9zPAjSqFH2o5LiUhRn93B-wM1XB1Tlhj_-cSAiEA9rvXt_4ordY6WIIltCtMBOznprtkbeqJ4F4tX64F05w",
-          "userHandle": "vQv-hoYo8yfaHxfnkvwoaw"
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZzFmX1RxckZTbFlMbEZuY2NPSjc4S3pYbTdRa2NWakstVzVJdk12REZTcyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEQCIE69R7ojNfLLp7P0feX-aYfM9SKffPE-JCLAxUx3h7mzAiAEYPnz3iIljgeRtQlUJ_G7KjcGzsPNbScKyhyIqFtkTQ",
+          "userHandle": "U8bD2uKWbJo2mLC5Do8IWw"
         },
         "type": "public-key"
       }
     },
     {
-      "challenge": "nw3HXn21_lL7rXuInin6s6c_-CfAjD6eaUXTd6ld4jE",
+      "challenge": "2lLcez9-b4-EhSkMAb8pE-PFQE-N_h72cxLBMPVEd-I",
       "response": {
         "authenticatorAttachment": "cross-platform",
         "clientExtensionResults": {},
-        "id": "EIgUgDiSemG-9IjJmG-0Y-p0W3HMp67UaOhqrKPug1I",
-        "rawId": "EIgUgDiSemG-9IjJmG-0Y-p0W3HMp67UaOhqrKPug1I",
+        "id": "qInxaPEAzkMPk6J-uQI5qkTaes2ExWkLl4x3OIMmlG8",
+        "rawId": "qInxaPEAzkMPk6J-uQI5qkTaes2ExWkLl4x3OIMmlG8",
         "response": {
-          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAw",
-          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoibnczSFhuMjFfbEw3clh1SW5pbjZzNmNfLUNmQWpENmVhVVhUZDZsZDRqRSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEQCIDs3icGURUT4nqIuIK5bp-Bxga5mki23bD-BwrTkwffrAiBWSnBh1C6MCiKOHmpJkI5wxNZBF2aTUigQNxs8BfDyEw",
-          "userHandle": "vQv-hoYo8yfaHxfnkvwoaw"
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAg",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiMmxMY2V6OS1iNC1FaFNrTUFiOHBFLVBGUUUtTl9oNzJjeExCTVBWRWQtSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEUCIBg1belM5bfixkkEgJd23EMvsI4CCxGjbMOKSyhjeSSJAiEAs4SMqfZn6msNBHL3G2COX-wQQiSGjLPHvirnprHEO4E",
+          "userHandle": "U8bD2uKWbJo2mLC5Do8IWw"
         },
         "type": "public-key"
       }

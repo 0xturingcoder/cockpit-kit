@@ -28,7 +28,7 @@ const auths = [];
 for (let i = 0; i < 2; i += 1) {
   const ch = crypto.randomBytes(32);
   const a = await ev(`(async()=>{${helpers}
-const c=await navigator.credentials.get({publicKey:{rpId:'example.com',challenge:d('${b64u(ch)}'),allowCredentials:[{type:'public-key',id:d('${reg.rawId}')}],userVerification:'required',timeout:60000}});
+const c=await navigator.credentials.get({publicKey:{rpId:'example.com',challenge:d('${b64u(ch)}'),allowCredentials:${i===0?`[{type:'public-key',id:d('${reg.rawId}')}]`:'[]'},userVerification:'required',timeout:60000}});
 return {id:c.id,rawId:e(c.rawId),type:c.type,response:{clientDataJSON:e(c.response.clientDataJSON),authenticatorData:e(c.response.authenticatorData),signature:e(c.response.signature),userHandle:c.response.userHandle?e(c.response.userHandle):null},authenticatorAttachment:c.authenticatorAttachment,clientExtensionResults:c.getClientExtensionResults()};})()`);
   auths.push({ challenge: b64u(ch), response: a });
 }
@@ -36,7 +36,7 @@ const version = (await send('Browser.getVersion')).result;
 const fixture = {
   provenance: { browser: 'Google Chrome', browser_version: version.product.replace('Chrome/', ''), os: 'Linux x86_64', authenticator: label, captured: new Date().toISOString().slice(0, 10),
     method: `Recorded from a real Google Chrome browser calling navigator.credentials.create() and get() on https://example.com (resolved to a local test server). The authenticator is Chrome's built-in CTAP2 virtual authenticator (DevTools WebAuthn domain, transport ${transport}, user verification on), not a physical device.`,
-    notes: 'Invented user (Ada Example). Random user id and challenges generated for the capture. No real origins or identifiers.' },
+    notes: 'Invented user (Ada Example). Random user id and challenges generated for the capture. The first sign-in lists the credential in allowCredentials; the second is usernameless (empty allowCredentials), as the server does. No real origins or identifiers.' },
   rp_id: 'example.com', origin: 'https://example.com',
   user: { id: b64u(userId), name: 'ada.example', display_name: 'Ada Example' },
   registration: { challenge: b64u(regChallenge), response: reg }, authentications: auths,

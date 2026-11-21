@@ -15,7 +15,7 @@ One JSON file per browser and authenticator, recorded from a real browser agains
 
 Provenance, precisely:
 
-- **Real browsers.** Each file is the output of a real, unmodified Google Chrome or Mozilla Firefox calling `navigator.credentials.create()` and then `navigator.credentials.get()` twice on `https://example.com`, which was routed to a local test server. The browser built `clientDataJSON` and returned the attestation object, authenticator data, and signatures.
+- **Real browsers.** Each file is the output of a real, unmodified Google Chrome or Mozilla Firefox calling `navigator.credentials.create()` and then `navigator.credentials.get()` twice on `https://example.com`, which was routed to a local test server. The first sign-in lists the credential in `allowCredentials`; the second is usernameless (empty `allowCredentials`), matching the server's sign-in flow, so the discoverable-credential path is covered too. The browser built `clientDataJSON` and returned the attestation object, authenticator data, and signatures.
 - **Virtual (software) authenticators, not physical devices.** Chrome used its built-in virtual authenticator (DevTools Protocol WebAuthn domain, CTAP2.1). Firefox used the WebDriver WebAuthn extension through geckodriver with its software token enabled (CTAP2). Both were configured with resident keys and user verification. Firefox's software token offers ES256 only, so there is no Firefox RS256 fixture.
 - **Unedited.** No fixture was changed after capture. The `provenance` block in each file was written by the capture script.
 - **Invented data.** The relying party is `example.com`, the user is "Ada Example" with a random user id, and the challenges are random bytes generated for the capture.
@@ -72,4 +72,5 @@ Recording notes:
 
 - Request `attestation: "none"`, `userVerification: "required"`, and ES256 (-7) or RS256 (-257). The verifier accepts only `none` attestation; a browser that returns another format (for example `packed` self attestation) fails registration by design.
 - All binary fields are unpadded base64url, as `PublicKeyCredential.toJSON()` produces.
+- Record at least one usernameless authentication (empty `allowCredentials`), since that is how the server signs in.
 - Record at least two authentications so the counter rule is exercised (all six fixtures here have non-zero, increasing counters). Synced passkeys usually report a counter of 0 every time, which is valid.
