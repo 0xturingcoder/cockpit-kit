@@ -170,6 +170,75 @@ test('audit: rate_limited events are written at most once per minute per event t
   assert.equal(log.list().filter((entry) => entry.result === 'rate_limited').length, 3);
 });
 
+const MINUTE = 60 * 1000;
+const isFailure = (entry) => entry.result === 'invalid' || entry.result === 'rate_limited';
+
+test('audit: a flood of invalid and rate_limited attempts never evicts a successful sign-in, and the newest failures are kept', () => {
+  const { root, audit } = layout();
+  const start = Date.parse('2026-03-04T05:06:07.000Z');
+  const c = clock(start);
+  const log = openAuditLog({ file: audit, root, now: c.now });
+  log.record('token_sign_in', 'ok');
+  // What the server writes under the 5-per-minute bucket: 5 invalid attempts
+  // get through each minute, then every further attempt is rate_limited
+  // (written at most once a minute).
+  const MINUTES = 45;
+  for (let minute = 1; minute <= MINUTES; minute += 1) {
+    c.at = start + minute * MINUTE;
+    for (let i = 0; i < 5; i += 1) assert.equal(log.record('token_sign_in', 'invalid'), true);
+    for (let i = 0; i < 10; i += 1) {
+      log.record('token_sign_in', 'rate_limited');
+      c.at += 1000;
+    }
+    assert.ok(log.list().length <= MAX_AUDIT_EVENTS, `minute ${minute}: the log stays bounded`);
+  }
+  const events = log.list();
+  assert.equal(events.length, MAX_AUDIT_EVENTS);
+  assert.deepEqual(events.at(-1), { at: new Date(start).toISOString(), event: 'token_sign_in', result: 'ok' }, 'the successful sign-in survives the flood');
+  // 6 failures a minute for 45 minutes is 270; the newest 199 are kept.
+  const failures = events.filter(isFailure);
+  assert.equal(failures.length, MAX_AUDIT_EVENTS - 1);
+  assert.deepEqual(failures[0], { at: new Date(start + MINUTES * MINUTE).toISOString(), event: 'token_sign_in', result: 'rate_limited' }, 'the newest failure is kept');
+  // The oldest 71 failures (11 whole minutes, then minute 12's invalid attempts) were dropped.
+  assert.deepEqual(failures.at(-1), { at: new Date(start + 12 * MINUTE).toISOString(), event: 'token_sign_in', result: 'rate_limited' }, 'the failures kept are the newest ones');
+});
+
+test('audit: notable entries beyond the cap evict the oldest notable entry; failures go first while there are any', () => {
+  const { root, audit } = layout();
+  const c = clock();
+  const log = openAuditLog({ file: audit, root, now: c.now });
+  const tick = () => { c.at += 1000; };
+  // A mix: failures can absorb the trim, so every notable entry is kept.
+  const notable = [['first_owner', 'ok'], ['token_sign_in', 'no_owner'], ['first_owner', 'owner_exists'], ['token_rotated', 'ok'], ['recovery_enroll', 'ok'], ['token_sign_in', 'ok'], ['token_sign_in', 'ok']];
+  for (let i = 0; i < MAX_AUDIT_EVENTS + 50; i += 1) {
+    tick();
+    if (i % 40 === 0) log.record(...notable[i / 40]);
+    else log.record('first_owner', 'invalid');
+  }
+  let events = log.list();
+  assert.equal(events.length, MAX_AUDIT_EVENTS);
+  assert.deepEqual(events.filter((entry) => !isFailure(entry)).map((entry) => [entry.event, entry.result]).reverse(), notable);
+  assert.deepEqual(events[0], { at: new Date(c.at).toISOString(), event: 'first_owner', result: 'invalid' }, 'the newest failure is kept');
+
+  // Only notable entries beyond the cap: the oldest notable entry goes.
+  for (let i = 0; i < MAX_AUDIT_EVENTS; i += 1) {
+    tick();
+    log.record('token_sign_in', 'ok');
+  }
+  events = log.list();
+  assert.equal(events.length, MAX_AUDIT_EVENTS);
+  assert.ok(events.every((entry) => entry.event === 'token_sign_in' && entry.result === 'ok'));
+  assert.equal(events[0].at, new Date(c.at).toISOString());
+  assert.equal(events.at(-1).at, new Date(c.at - (MAX_AUDIT_EVENTS - 1) * 1000).toISOString(), 'the oldest notable entries were dropped');
+  // A failure has no room in a log full of notable entries: it is not written.
+  tick();
+  assert.equal(log.record('token_sign_in', 'invalid'), false);
+  assert.deepEqual(log.list(), events);
+  tick();
+  assert.equal(log.record('token_rotated', 'ok'), true);
+  assert.equal(log.list()[0].event, 'token_rotated');
+});
+
 test('audit: an invalid or unsafe log fails closed for reads and writes', posixOnly, () => {
   const { root, audit } = layout();
   const log = openAuditLog({ file: audit, root });

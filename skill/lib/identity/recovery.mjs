@@ -14,8 +14,13 @@
 //   another process takes effect on the next request.
 // - The audit log, audit.json, keeps only { at, event, result } per event,
 //   from fixed lists: never a token, hash, IP address, or User-Agent. It
-//   keeps the newest MAX_AUDIT_EVENTS events, and writes at most one
-//   rate_limited event per event type per minute.
+//   holds at most MAX_AUDIT_EVENTS events. Past that, the oldest failed
+//   attempt (an invalid or rate_limited token_sign_in or first_owner) is
+//   dropped first; a notable event (any other result, and every
+//   token_rotated and recovery_enroll) is dropped, oldest first, only when
+//   notable events alone exceed the cap. So no number of unauthenticated
+//   failures can push a successful or security-relevant event out. At most
+//   one rate_limited event per event type per minute is written.
 // - File safety (0600, atomic rename, lock file, size cap, fail closed) is
 //   shared with the other identity files through private-file.mjs.
 import crypto from 'node:crypto';
@@ -32,6 +37,9 @@ export const AUDIT_SCHEMA_VERSION = 1;
 export const MAX_AUDIT_EVENTS = 200;
 export const AUDIT_EVENTS = Object.freeze(['token_sign_in', 'token_rotated', 'first_owner', 'recovery_enroll']);
 export const AUDIT_RESULTS = Object.freeze(['ok', 'invalid', 'rate_limited', 'no_owner', 'owner_exists']);
+// Results of a failed unauthenticated attempt, for these events; dropped first when trimming.
+export const FAILURE_RESULTS = Object.freeze(['invalid', 'rate_limited']);
+const ATTEMPT_EVENTS = Object.freeze(['token_sign_in', 'first_owner']);
 // At most one rate_limited event per event type in this window.
 export const RATE_LIMITED_COALESCE_MS = 60 * 1000;
 export const RECOVERY_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -106,6 +114,32 @@ export const validateAuditData = (data) => {
 };
 
 const iso = (ms) => new Date(ms).toISOString();
+
+/** True for a failed unauthenticated attempt; every other entry is notable. */
+export const isFailedAttempt = (entry) => ATTEMPT_EVENTS.includes(entry.event) && FAILURE_RESULTS.includes(entry.result);
+
+/**
+ * Keep at most `max` of `events` (oldest first), in order: drop the oldest
+ * failed attempts first, then, only if notable entries alone exceed `max`,
+ * the oldest notable entries.
+ *
+ * @template {{ event: string, result: string }} T
+ * @param {T[]} events
+ * @param {number} [max]
+ * @returns {T[]}
+ */
+export const trimAuditEvents = (events, max = MAX_AUDIT_EVENTS) => {
+  const excess = events.length - max;
+  if (excess <= 0) return events;
+  const indexesWhere = (keep) => events.flatMap((entry, index) => (keep(entry) ? [index] : []));
+  const failures = indexesWhere(isFailedAttempt);
+  const dropFailures = Math.min(excess, failures.length);
+  const dropped = new Set([
+    ...failures.slice(0, dropFailures),
+    ...indexesWhere((entry) => !isFailedAttempt(entry)).slice(0, excess - dropFailures),
+  ]);
+  return events.filter((_, index) => !dropped.has(index));
+};
 
 const constantTimeEqual = (a, b) => {
   const left = Buffer.from(a);
@@ -262,10 +296,14 @@ export const openAuditLog = ({
   };
 
   /**
-   * Append { at, event, result }, dropping the oldest events beyond
-   * MAX_AUDIT_EVENTS. A rate_limited event within a minute of the last one
-   * for the same event type is not written. Returns true when written.
-   * Throws RecoveryStoreError when the log cannot be written.
+   * Append { at, event, result }, then trim to MAX_AUDIT_EVENTS with
+   * trimAuditEvents: the oldest failed attempts (invalid or rate_limited)
+   * go first, and a notable entry goes only to make room for a newer notable
+   * entry once notable entries alone fill the log. A failed attempt that
+   * finds the log full of notable entries is therefore not written, nor is
+   * a rate_limited event within a minute of the last one for the same event
+   * type. Returns true when written. Throws RecoveryStoreError when the log
+   * cannot be written (or is damaged: nothing is trimmed or rewritten then).
    */
   const record = (event, result) => {
     if (!AUDIT_EVENTS.includes(event)) fail('event is not a known event', 'invalid_argument');
@@ -279,7 +317,9 @@ export const openAuditLog = ({
         const last = current.events.findLast((entry) => entry.event === event && entry.result === 'rate_limited');
         if (last && nowMs - Date.parse(last.at) < RATE_LIMITED_COALESCE_MS) return false;
       }
-      const events = [...current.events, { at: iso(nowMs), event, result }].slice(-MAX_AUDIT_EVENTS);
+      const entry = { at: iso(nowMs), event, result };
+      const events = trimAuditEvents([...current.events, entry]);
+      if (events.at(-1) !== entry) return false;
       const next = validateAuditData({ schema_version: AUDIT_SCHEMA_VERSION, events });
       auditFile.write(storeFile, auditFile.serialize(next), () => {
         if (!isHeld()) fail('Another writer took over the audit log lock; nothing was written', 'store_busy');

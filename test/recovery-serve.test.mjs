@@ -185,6 +185,35 @@ test('recovery: attempts are rate limited (5 at once) with Retry-After, and each
   });
 });
 
+test('recovery: 40 minutes of bad attempts against the bucket cannot push a successful sign-in out of the audit log', async () => {
+  const layout = makeServeRoot();
+  const clock = clockFrom(Date.parse('2026-03-04T05:06:00.000Z'));
+  const start = clock.at;
+  await withServe(serveConfig(layout), async (ctx) => {
+    await registerOwner(ctx, makeCredential());
+    const rec = await recovery(ctx);
+    const MINUTES = 40;
+    for (let minute = 1; minute <= MINUTES; minute += 1) {
+      clock.at = start + minute * MINUTE;
+      const statuses = [];
+      for (let i = 0; i < 7; i += 1) statuses.push((await recoverySignIn(ctx, { token: 'A'.repeat(43) })).res.status);
+      assert.deepEqual(statuses, [401, 401, 401, 401, 401, 429, 429], `minute ${minute}`);
+      assert.ok(readAudit(layout).events.length <= 200, `minute ${minute}: the log stays bounded`);
+    }
+    const res = await call({ port: ctx.port, pathname: '/auth/account/audit', cookie: rec.cookie });
+    assert.equal(res.status, 200, res.text);
+    const { events } = res.json;
+    assert.equal(events.length, 200);
+    assert.deepEqual(events.slice(-2).map((e) => `${e.event}:${e.result}`), ['token_sign_in:ok', 'first_owner:ok'], 'the successful entries survive');
+    const failures = events.filter((e) => e.result === 'invalid' || e.result === 'rate_limited');
+    // 6 failures written a minute for 40 minutes is 240; the newest 198 are kept,
+    // so the oldest 7 minutes are gone.
+    assert.equal(failures.length, 198);
+    assert.deepEqual(failures[0], { at: new Date(start + MINUTES * MINUTE).toISOString(), event: 'token_sign_in', result: 'rate_limited' });
+    assert.deepEqual(failures.at(-1), { at: new Date(start + 8 * MINUTE).toISOString(), event: 'token_sign_in', result: 'invalid' });
+  }, { now: clock.now });
+});
+
 test('recovery: the owner sees the audit log in the account API, newest first; members cannot', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout), async (ctx) => {
