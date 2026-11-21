@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ChallengeError, DEFAULT_MAX_CHALLENGES, createChallengeStore } from '../skill/lib/identity/challenges.mjs';
+import { ChallengeError, DEFAULT_CHALLENGE_TTL_MS, DEFAULT_MAX_CHALLENGES, createChallengeStore } from '../skill/lib/identity/challenges.mjs';
 import { PasskeyError, createPasskeyCeremonies } from '../skill/lib/identity/passkeys.mjs';
 import { IdentityStoreError, openIdentityStore } from '../skill/lib/identity/store.mjs';
 import { WebAuthnError, parseCoseKey, verifyAuthentication } from '../skill/lib/identity/webauthn.mjs';
@@ -113,6 +113,15 @@ test('challenges are bounded in number; expired ones free their slots', () => {
   now.advance(1000);
   assert.doesNotThrow(() => challenges.issue({ ceremony: 'authentication' }));
   assert.equal(challenges.size(), 1);
+});
+
+test('the default challenge lifetime is 2 minutes and is the ceremony timeout for both ceremonies', () => {
+  assert.equal(DEFAULT_CHALLENGE_TTL_MS, 120000);
+  assert.equal(createChallengeStore().ttlMs, 120000);
+  const { root, file } = makeLayout();
+  const ceremonies = createPasskeyCeremonies({ store: openIdentityStore({ file, root }), rpId: RP_ID, origins: [ORIGIN] });
+  assert.equal(ceremonies.startRegistration({ displayName: 'Ada Example' }).publicKey.timeout, 120000);
+  assert.equal(ceremonies.startAuthentication().publicKey.timeout, 120000);
 });
 
 test('challenge limits are per ceremony: a full sign-in ceremony does not block registration', () => {

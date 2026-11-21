@@ -286,7 +286,11 @@ test('ES256 signatures must be strict DER', () => {
   const expectedChallenge = challenge();
   const data = authData({ signCount: 1 });
   const client = clientData({ type: 'webauthn.get', challenge: expectedChallenge });
-  const der = sign(es256, Buffer.concat([data, sha256(client)]));
+  // Re-sign until the DER signature is at most 71 bytes, so wrong_seq_len
+  // (one byte longer) stays within the 72-byte limit and reaches the
+  // sequence-length check instead of the overall length check.
+  let der;
+  do der = sign(es256, Buffer.concat([data, sha256(client)])); while (der.length > 71);
   const respond = (signature) => authenticate(es256, {
     expectedChallenge,
     response: authenticationResponse({ credential: es256, challenge: expectedChallenge, authDataBytes: data, clientDataBytes: client, signature }),
@@ -320,6 +324,7 @@ test('ES256 signatures must be strict DER', () => {
   const sIsN = Buffer.concat([der.subarray(2, 4 + rLen), Buffer.from([0x02, nBytes.length]), nBytes]);
   variants.s_equals_n = Buffer.concat([Buffer.from([0x30, sIsN.length]), sIsN]);
 
+  assert.ok(variants.wrong_seq_len.length <= 72);
   for (const [name, signature] of Object.entries(variants)) {
     assert.throws(respond(signature), code('bad_signature'), name);
     assert.throws(() => derToRawEcdsa(signature), code('bad_signature'), name);
