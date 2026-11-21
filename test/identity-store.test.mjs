@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import {
   IDENTITY_SCHEMA_VERSION, IdentityStoreError, MAX_FILE_BYTES, assertOutsideRoot, findCredential, findUser, openIdentityStore, validateIdentityData,
 } from '../skill/lib/identity/store.mjs';
@@ -85,7 +86,7 @@ function assertRejects(fn, code, secrets = []) {
 }
 
 function tempFiles(dir) {
-  return fs.readdirSync(dir).filter((name) => name.endsWith('.tmp') || name.endsWith('.lock'));
+  return fs.readdirSync(dir).filter((name) => /\.(tmp|lock|stale)$/.test(name));
 }
 
 test('createUser bootstraps the store with exactly one owner and an owner-only file', () => {
@@ -331,7 +332,11 @@ test('writes fsync a temp file, and a failed rename keeps the old file intact', 
   const fsynced = [];
   const realFsync = fs.fsyncSync;
   t.mock.method(fs, 'fsyncSync', (fd) => { fsynced.push(fd); return realFsync(fd); });
-  t.mock.method(fs, 'renameSync', () => { throw Object.assign(new Error('simulated crash before rename'), { code: 'EIO' }); });
+  const realRename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to === file) throw Object.assign(new Error('simulated crash before rename'), { code: 'EIO' });
+    return realRename(from, to);
+  });
   assert.throws(() => store.addCredential(owner.id, credential()), /simulated crash/);
   assert.ok(fsynced.length >= 1, 'the temp file is fsynced before rename');
   assert.deepEqual(fs.readFileSync(file), before);
@@ -386,28 +391,109 @@ test('a write over the 1 MiB cap is refused with store_full and the store stays 
   assert.equal(findCredential(store.load(), victim.id), null);
 });
 
+function holdLock(file, token, ageMs = 0) {
+  const lockFile = `${file}.lock`;
+  fs.writeFileSync(lockFile, token, { mode: 0o600 });
+  if (ageMs) {
+    const old = new Date(Date.now() - ageMs);
+    fs.utimesSync(lockFile, old, old);
+  }
+  return lockFile;
+}
+
 test('a stale lock left by a crashed writer is cleared', () => {
   const { file, store } = seeded();
-  const lockDir = `${file}.lock`;
-  fs.mkdirSync(lockDir);
-  const old = new Date(Date.now() - 60_000);
-  fs.utimesSync(lockDir, old, old);
+  const lockFile = holdLock(file, 'crashed-writer', 60_000);
   store.createUser({ displayName: 'Test Member Two' });
-  assert.equal(fs.existsSync(lockDir), false);
+  assert.equal(fs.existsSync(lockFile), false);
   assert.equal(store.load().users.length, 3);
+  assert.deepEqual(tempFiles(path.dirname(file)), []);
+});
+
+test('a writer whose lock was taken over writes nothing and leaves the new lock alone', () => {
+  const { file, root } = makeLayout();
+  const lockFile = `${file}.lock`;
+  let takeOver = false;
+  const store = openIdentityStore({
+    file,
+    root,
+    // The clock runs inside the locked section, so it can stand in for a
+    // second writer that takes the lock over mid-change.
+    now: () => {
+      if (takeOver) {
+        fs.rmSync(lockFile);
+        holdLock(file, 'new-owner');
+      }
+      return Date.parse('2026-01-02T03:04:05.000Z');
+    },
+  });
+  store.createUser({ displayName: 'Ada Example', role: 'owner' });
+  const before = fs.readFileSync(file);
+  takeOver = true;
+  assertRejects(() => store.createUser({ displayName: 'Test Member' }), 'store_busy');
+  assert.deepEqual(fs.readFileSync(file), before, 'nothing was written');
+  assert.equal(fs.readFileSync(lockFile, 'utf8'), 'new-owner', 'release did not delete the new owner\'s lock');
+  assert.deepEqual(tempFiles(path.dirname(file)).filter((name) => name !== 'identity.json.lock'), []);
+});
+
+test('only one writer wins a stale lock; a lock re-taken in between is put back', (t) => {
+  const { file, root } = seeded();
+  const before = fs.readFileSync(file);
+  const lockFile = holdLock(file, 'crashed-writer', 60_000);
+  const realRename = fs.renameSync;
+  let raced = false;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    if (from === lockFile && !raced) {
+      // Another writer cleared the same stale lock and took a fresh one
+      // between our staleness check and our takeover.
+      raced = true;
+      fs.rmSync(lockFile);
+      holdLock(file, 'writer-a');
+    }
+    return realRename(from, to);
+  });
+  const store = openIdentityStore({ file, root, lockWaitMs: 50 });
+  assertRejects(() => store.createUser({ displayName: 'Test Member Two' }), 'store_busy');
+  t.mock.restoreAll();
+  assert.equal(raced, true);
+  assert.equal(fs.readFileSync(lockFile, 'utf8'), 'writer-a', 'the fresh lock was restored, not deleted');
+  assert.deepEqual(fs.readFileSync(file), before);
+  assert.deepEqual(tempFiles(path.dirname(file)), ['identity.json.lock']);
+});
+
+test('two processes adding credentials at once do not lose updates', async () => {
+  const { file, root, store, owner } = seeded();
+  const storeUrl = new URL('../skill/lib/identity/store.mjs', import.meta.url).href;
+  const script = `
+    import crypto from 'node:crypto';
+    import { openIdentityStore } from ${JSON.stringify(storeUrl)};
+    const [file, root, userId] = process.argv.slice(1);
+    const store = openIdentityStore({ file, root, lockWaitMs: 20000 });
+    for (let i = 0; i < 15; i += 1) {
+      store.addCredential(userId, { id: crypto.randomBytes(16), publicKey: Buffer.concat([Buffer.from([0xa1]), crypto.randomBytes(8)]) });
+    }`;
+  const run = () => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, file, root, owner.id], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`writer exited ${code}: ${stderr}`))));
+  });
+  await Promise.all([run(), run()]);
+  assert.equal(store.load().users[0].credentials.length, 30);
+  assert.deepEqual(tempFiles(path.dirname(file)), []);
 });
 
 test('a fresh lock held by another writer makes mutators throw store_busy after the wait', () => {
   const { file, root, store } = seeded();
   const before = fs.readFileSync(file);
-  const lockDir = `${file}.lock`;
-  fs.mkdirSync(lockDir);
+  const lockFile = holdLock(file, 'other-writer');
   const busy = openIdentityStore({ file, root, lockWaitMs: 50 });
   const started = Date.now();
   assertRejects(() => busy.createUser({ displayName: 'Test Member Two' }), 'store_busy');
   assert.ok(Date.now() - started < 2000, 'the shortened wait is honored');
   assert.deepEqual(fs.readFileSync(file), before);
-  assert.equal(fs.existsSync(lockDir), true, 'the other writer keeps its lock');
+  assert.equal(fs.readFileSync(lockFile, 'utf8'), 'other-writer', 'the other writer keeps its lock');
   assert.equal(store.load().users.length, 2, 'reads do not need the lock');
   assertRejects(() => openIdentityStore({ file, root, lockWaitMs: -1 }), 'invalid_argument');
   assertRejects(() => openIdentityStore({ file, root, lockStaleMs: Number.NaN }), 'invalid_argument');

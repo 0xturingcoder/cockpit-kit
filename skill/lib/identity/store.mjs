@@ -11,8 +11,11 @@
 //   served root; openIdentityStore() refuses otherwise.
 // - Writes go to an exclusive 0600 temp file in the same directory, are
 //   fsynced, then renamed over the store, so a reader sees the old file or
-//   the new one, never a partial one. Mutations hold a short directory lock
-//   and re-read the file first, so concurrent writers do not lose updates.
+//   the new one, never a partial one. Mutations hold a short lock file that
+//   carries a random token, and re-read the file first, so concurrent writers
+//   do not lose updates. A lock is only removed (on release or stale
+//   takeover) if its token still matches, and a writer that lost its lock
+//   writes nothing.
 // - A write whose serialized size exceeds the 1 MiB load cap is refused
 //   ("store_full") before anything is written.
 // - Loading fails closed: a symlink, a file another user owns, a file with
@@ -54,6 +57,9 @@ const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const DEFAULT_LOCK_WAIT_MS = 5000;
 const DEFAULT_LOCK_STALE_MS = 30000;
 const CHECK_MODE = process.platform !== 'win32';
+// Open without following a final symlink, and without blocking on a FIFO,
+// where the platform has those flags.
+const READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
 
 const STORE_KEYS = ['schema_version', 'users'];
 const USER_KEYS = ['id', 'display_name', 'role', 'disabled', 'created_at', 'credentials'];
@@ -386,7 +392,7 @@ const serialize = (data) => {
   return text;
 };
 
-const writeStoreFile = (file, text) => {
+const writeStoreFile = (file, text, beforeRename = () => {}) => {
   const dir = path.dirname(file);
   const temp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
   const fd = fs.openSync(temp, 'wx', 0o600);
@@ -398,6 +404,7 @@ const writeStoreFile = (file, text) => {
     } finally {
       fs.closeSync(fd);
     }
+    beforeRename();
     fs.renameSync(temp, file);
   } catch (error) {
     fs.rmSync(temp, { force: true });
@@ -411,32 +418,105 @@ const ensureDir = (dir) => {
   if (!fs.statSync(dir).isDirectory()) fail('Identity store directory is not a directory', 'unsafe_path');
 };
 
-const withLock = (lockDir, { waitMs, staleMs }, fn) => {
+// The write lock is a file, <store>.lock, holding a random token that names
+// its owner. It is written to a temp file and hard-linked into place, which
+// fails with EEXIST while another writer holds it, so the lock never exists
+// half-written.
+
+// Returns { token, mtimeMs } for the lock at `lockFile`, or null if none.
+const readLock = (lockFile) => {
+  let fd;
+  try {
+    fd = fs.openSync(lockFile, READ_FLAGS);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    const buffer = Buffer.alloc(64);
+    const length = stat.isFile() ? fs.readSync(fd, buffer, 0, buffer.length, 0) : 0;
+    return { token: buffer.toString('utf8', 0, length), mtimeMs: stat.mtimeMs };
+  } finally {
+    fs.closeSync(fd);
+  }
+};
+
+const createLock = (lockFile, token) => {
+  const temp = `${lockFile}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(temp, token, { flag: 'wx', mode: 0o600 });
+  try {
+    fs.linkSync(temp, lockFile);
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST') return false;
+    throw error;
+  } finally {
+    fs.rmSync(temp, { force: true });
+  }
+};
+
+// Remove the lock only if it still carries `token`. Renaming it to a unique
+// name first means only one process can claim a given lock file. If what was
+// moved turns out to be someone else's lock (it was re-taken in between), it
+// is linked straight back.
+const removeLockIf = (lockFile, token) => {
+  const aside = `${lockFile}.${crypto.randomBytes(6).toString('hex')}.stale`;
+  try {
+    fs.renameSync(lockFile, aside);
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+  try {
+    if (readLock(aside)?.token === token) return true;
+    try {
+      fs.linkSync(aside, lockFile);
+    } catch {
+      // A newer lock is already in place; leave it alone.
+    }
+    return false;
+  } finally {
+    fs.rmSync(aside, { recursive: true, force: true });
+  }
+};
+
+// Run fn(isHeld) while holding the lock. isHeld() reports whether the lock
+// still carries this writer's token, so a writer whose lock was taken over
+// can stop before it writes.
+const withLock = (lockFile, { waitMs, staleMs }, fn) => {
+  const token = crypto.randomBytes(16).toString('hex');
   const deadline = Date.now() + waitMs;
   for (;;) {
+    let current;
     try {
-      fs.mkdirSync(lockDir, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') fail('Cannot take the identity store lock', 'store_busy');
-    }
-    try {
+      if (createLock(lockFile, token)) break;
+      current = readLock(lockFile);
+      if (!current) continue;
       // A lock older than staleMs is presumed abandoned; locks are held only
-      // for one read-modify-write.
-      if (Date.now() - fs.statSync(lockDir).mtimeMs > staleMs) {
-        fs.rmSync(lockDir, { recursive: true, force: true });
-        continue;
-      }
+      // for one read-modify-write, which takes milliseconds.
+      if (Date.now() - current.mtimeMs > staleMs && removeLockIf(lockFile, current.token)) continue;
     } catch {
-      continue;
+      fail('Cannot take the identity store lock', 'store_busy');
     }
     if (Date.now() > deadline) fail('Identity store is locked by another writer', 'store_busy');
     sleep(25);
   }
+  const isHeld = () => {
+    try {
+      return readLock(lockFile)?.token === token;
+    } catch {
+      return false;
+    }
+  };
   try {
-    return fn();
+    return fn(isHeld);
   } finally {
-    fs.rmSync(lockDir, { recursive: true, force: true });
+    try {
+      removeLockIf(lockFile, token);
+    } catch {
+      // Leave it; it becomes stale and is taken over later.
+    }
   }
 };
 
@@ -471,7 +551,7 @@ export const openIdentityStore = ({
     if (!Number.isFinite(value) || value < 0) fail(`${name} must be a non-negative number of milliseconds`, 'invalid_argument');
   }
   const storeFile = path.resolve(assertOutsideRoot(file, root));
-  const lockDir = `${storeFile}.lock`;
+  const lockFile = `${storeFile}.lock`;
   const lockOptions = { waitMs: lockWaitMs, staleMs: lockStaleMs };
 
   // Read, transform, validate, and atomically write under the lock. A missing
@@ -479,7 +559,7 @@ export const openIdentityStore = ({
   const mutate = (transform, { allowMissing = false } = {}) => {
     assertOutsideRoot(storeFile, root);
     ensureDir(path.dirname(storeFile));
-    return withLock(lockDir, lockOptions, () => {
+    return withLock(lockFile, lockOptions, (isHeld) => {
       let current;
       try {
         current = readStoreFile(storeFile);
@@ -488,7 +568,11 @@ export const openIdentityStore = ({
         current = EMPTY;
       }
       const { data, result, unchanged } = transform(current);
-      if (!unchanged) writeStoreFile(storeFile, serialize(validateIdentityData(data)));
+      if (!unchanged) {
+        writeStoreFile(storeFile, serialize(validateIdentityData(data)), () => {
+          if (!isHeld()) fail('Another writer took over the identity store lock; nothing was written', 'store_busy');
+        });
+      }
       return clone(result);
     });
   };
