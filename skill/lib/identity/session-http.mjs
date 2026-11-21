@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { INVITE_ID_RE, InviteStoreError } from './invites.mjs';
 import { HttpError, parseJson, readBody, sendJson } from './passkey-http.mjs';
 import { fileSignature } from './private-file.mjs';
+import { RecoveryStoreError } from './recovery.mjs';
 import { SessionStoreError } from './sessions.mjs';
 import { IdentityStoreError, findCredential, findUser, isSafeDisplayName } from './store.mjs';
 
@@ -182,7 +183,8 @@ const STORE_ERRORS = Object.freeze({
   too_many_invites: () => new HttpError(409, 'too_many_invites', 'There are too many pending invites; revoke one first.'),
 });
 
-const isStoreError = (error) => error instanceof SessionStoreError || error instanceof IdentityStoreError || error instanceof InviteStoreError;
+const isStoreError = (error) => error instanceof SessionStoreError || error instanceof IdentityStoreError || error instanceof InviteStoreError
+  || error instanceof RecoveryStoreError;
 
 const storeError = (error) => {
   if (isStoreError(error) && STORE_ERRORS[error.code]) return STORE_ERRORS[error.code]();
@@ -204,9 +206,15 @@ const safeEqual = (a, b) => {
  * @param {(principal: string, sessionId: string) => string} options.csrfToken Per-session CSRF token.
  * @param {(secure: boolean) => string[]} options.signOutCookies Set-Cookie values that sign this browser out.
  * @param {import('./invites.mjs').InviteStore} [options.invites] Invites store; without it the invite routes return 404.
+ * @param {{ list: () => { at: string, event: string, result: string }[] }} [options.audit] Recovery audit log; without it GET /audit returns 404.
+ * @param {number} [options.stepUpWindowMs] Step-up freshness window for invite creation.
+ * @param {() => number} [options.now] Clock for the step-up window (tests).
  * @param {(message: string) => void} [options.log]
  */
-export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins, csrfToken, signOutCookies, invites = null, log = () => {} }) => {
+export const createAccountApi = ({
+  auth, sessions, identityStore, allowedOrigins, csrfToken, signOutCookies, invites = null, audit = null,
+  stepUpWindowMs = DEFAULT_STEP_UP_WINDOW_MS, now = Date.now, log = () => {},
+}) => {
   const checkPost = (req) => {
     const origin = req.headers.origin;
     if (!origin || !new Set(allowedOrigins()).has(origin)) throw new HttpError(403, 'origin_denied', 'Origin not allowed.');
@@ -264,8 +272,10 @@ export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins
         }
       },
       // The one response that carries an invite token, inside the link.
-      POST: (req) => mutation(req, ({ user, body, origin }) => {
+      // Creating an invite needs a fresh passkey step-up, from any session kind.
+      POST: (req) => mutation(req, ({ session, user, body, origin }) => {
         requireOwner({ user });
+        requireFreshStepUp({ session }, { now: now(), windowMs: stepUpWindowMs });
         if (!isSafeDisplayName(body.display_name)) {
           throw new HttpError(400, 'invalid_request', 'display_name must be 1 to 128 characters without surrounding whitespace, control, or formatting characters.');
         }
@@ -283,8 +293,20 @@ export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins
     },
   } : {};
 
+  // Recovery activity for the owner: time, event, and result only.
+  const auditRoutes = audit ? {
+    '/audit': {
+      GET: (req) => {
+        checkGet(req);
+        requireOwner(requireSession(req));
+        return { status: 200, body: { events: audit.list() } };
+      },
+    },
+  } : {};
+
   const routes = {
     ...inviteRoutes,
+    ...auditRoutes,
     '': {
       GET: (req) => {
         checkGet(req);
