@@ -9,7 +9,7 @@ import path from 'node:path';
 import { ChallengeError, createChallengeStore } from '../skill/lib/identity/challenges.mjs';
 import { PasskeyError, createPasskeyCeremonies } from '../skill/lib/identity/passkeys.mjs';
 import { IdentityStoreError, openIdentityStore } from '../skill/lib/identity/store.mjs';
-import { WebAuthnError } from '../skill/lib/identity/webauthn.mjs';
+import { WebAuthnError, parseCoseKey, verifyAuthentication } from '../skill/lib/identity/webauthn.mjs';
 import { authenticationResponse, makeCredential, registrationResponse } from './support/webauthn-synthetic.mjs';
 
 const RP_ID = 'example.com';
@@ -42,12 +42,12 @@ const errorCode = (Type, expected) => (error) => {
 const userHandleOf = (options) => Buffer.from(options.publicKey.user.id, 'base64url');
 
 // A ceremony harness over a fresh identity store with a controllable clock.
-const harness = ({ lockWaitMs = 200 } = {}) => {
+const harness = ({ lockWaitMs = 200, verify } = {}) => {
   const layout = makeLayout();
   const now = clock();
   const store = openIdentityStore({ file: layout.file, root: layout.root, lockWaitMs });
   const challenges = createChallengeStore({ now });
-  const ceremonies = createPasskeyCeremonies({ store, rpId: RP_ID, origins: [ORIGIN], challenges });
+  const ceremonies = createPasskeyCeremonies({ store, rpId: RP_ID, origins: [ORIGIN], challenges, ...(verify ? { verify } : {}) });
   const registerOwner = (credential, { displayName = 'Ada Example', label = '' } = {}) => {
     const options = ceremonies.startRegistration({ displayName });
     const response = registrationResponse({ credential, challenge: Buffer.from(options.publicKey.challenge, 'base64url'), rpId: RP_ID, origin: ORIGIN });
@@ -225,6 +225,59 @@ test('negative: unknown credential is rejected in a sign-in ceremony', () => {
   // Before any store exists, every credential is unknown.
   const empty = harness();
   assert.throws(() => empty.ceremonies.finishAuthentication(empty.signInResponse(stranger, { userId: 'usr_nobody_00001' })), errorCode(PasskeyError, 'unknown_credential'));
+});
+
+// Records each verifier call and how it ended, then behaves like the real one.
+const verifySpy = () => {
+  const calls = [];
+  const verify = (input) => {
+    const call = { credential: input.credential, error: null };
+    calls.push(call);
+    try {
+      return verifyAuthentication(input);
+    } catch (error) {
+      call.error = error;
+      throw error;
+    }
+  };
+  return { calls, verify };
+};
+
+test('negative: an unknown credential does the same signature work as a known one (dummy key of the same algorithm) and still fails generically', () => {
+  for (const alg of [-7, -257]) {
+    const spy = verifySpy();
+    const h = harness({ verify: spy.verify });
+    const { result } = h.registerOwner(makeCredential());
+    const stranger = makeCredential({ alg });
+    const attempt = h.signInResponse(stranger, { userId: result.userId });
+    spy.calls.length = 0;
+    assert.throws(() => h.ceremonies.finishAuthentication(attempt), errorCode(PasskeyError, 'unknown_credential'), `alg ${alg}`);
+    assert.equal(spy.calls.length, 1, `alg ${alg}: verifier ran once`);
+    const [call] = spy.calls;
+    assert.equal(parseCoseKey(Buffer.from(call.credential.publicKey, 'base64url')).alg, alg, `alg ${alg}: dummy key family`);
+    assert.ok(call.error instanceof WebAuthnError && call.error.code === 'bad_signature', `alg ${alg}: reached the signature check`);
+  }
+  // With no store yet, the dummy verification still runs.
+  const spy = verifySpy();
+  const empty = harness({ verify: spy.verify });
+  assert.throws(() => empty.ceremonies.finishAuthentication(empty.signInResponse(makeCredential(), { userId: 'usr_nobody_00001' })), errorCode(PasskeyError, 'unknown_credential'));
+  assert.equal(spy.calls.length, 1);
+  assert.equal(spy.calls[0].error.code, 'bad_signature');
+});
+
+test('ceremony: a disabled user is refused only after the signature is verified', () => {
+  const spy = verifySpy();
+  const h = harness({ verify: spy.verify });
+  h.registerOwner(makeCredential());
+  const member = h.store.createUser({ displayName: 'Test Member' });
+  const credential = makeCredential();
+  h.store.addCredential(member.id, { id: credential.rawId, publicKey: credential.cose });
+  h.store.disableUser(member.id);
+  spy.calls.length = 0;
+  assert.throws(() => h.ceremonies.finishAuthentication(h.signInResponse(credential, { userId: member.id, signCount: 2 })), errorCode(PasskeyError, 'user_disabled'));
+  assert.equal(spy.calls.length, 1);
+  assert.equal(spy.calls[0].error, null);
+  assert.equal(h.store.load().users[1].credentials[0].counter, 0);
 });
 
 test('negative: lower or equal signCount is rejected in a sign-in ceremony and the stored counter is unchanged', () => {

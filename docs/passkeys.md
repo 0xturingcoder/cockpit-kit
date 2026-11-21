@@ -61,7 +61,7 @@ The challenge is bound to the user it was issued for, so the response can only a
 
 1. `POST /auth/passkey/login/options` with `{}`. Returns `{ challenge_id, publicKey }` with `challenge`, `rpId`, `timeout`, `userVerification: "required"`, and an empty `allowCredentials`. Nothing names a user, so the options never reveal who exists.
 2. The page calls `navigator.credentials.get()`.
-3. `POST /auth/passkey/login/verify` with `{ challenge_id, credential }`. The server consumes the challenge, looks up the credential by `rawId`, refuses disabled users, verifies the response against the stored public key (including that the user handle names the credential's owner), and stores the new signature counter. Returns `200 { signed_in: true, user_id }` and, for the owner, `Set-Cookie: cockpit_serve=...; HttpOnly; SameSite=Strict; Path=/` (plus `Secure` on https).
+3. `POST /auth/passkey/login/verify` with `{ challenge_id, credential }`. The server consumes the challenge, looks up the credential by `rawId`, verifies the response against the stored public key (including that the user handle names the credential's owner), refuses disabled users, and stores the new signature counter. Returns `200 { signed_in: true, user_id }` and, for the owner, `Set-Cookie: cockpit_serve=...; HttpOnly; SameSite=Strict; Path=/` (plus `Secure` on https).
 
 ### Requests
 
@@ -113,7 +113,7 @@ Every error response is `{ "error": { "code", "message" } }` with a fixed messag
 | 403 | `session_unavailable` | Verified, but the user is a member (sessions for members come with #9). |
 | 503 | `store_busy` | The identity store lock was busy for more than 1 second while saving the counter. Retry. |
 
-Note: an unknown credential id is refused without verifying a signature, so response timing can show whether a given credential id is registered. Credential ids are random values chosen by authenticators, so this does not reveal users.
+Timing: an unknown credential id is not refused early. The server runs the full verification against a dummy public key of the same algorithm family (ES256, or RS256 when the signature has RSA length), generated at startup with its private half discarded, and then refuses with the same generic error. A disabled user is refused only after the real verification. So a failed sign-in does the same parsing and one signature verification whether or not the credential id is registered. Residual differences: the dummy RSA key is 2048-bit, so a registered 3072- or 4096-bit RSA key verifies a little more slowly, and a successful verification is followed by a counter write. Credential ids are random values chosen by authenticators, so even a measurable difference would not reveal users.
 
 **Registration** is operator-only, so it returns the specific reason:
 
