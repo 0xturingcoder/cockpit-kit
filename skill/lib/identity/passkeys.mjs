@@ -170,17 +170,19 @@ export const createPasskeyCeremonies = ({
   };
 
   /**
-   * Finish an invitation: verify the response, spend the invite, then
-   * create the member with this passkey in one identity store write.
+   * Finish an invitation: verify the response, claim the invite, create
+   * the member with this passkey in one identity store write, then delete
+   * the invite.
    *
    * The token must hash to the invite the challenge was issued for, so a
    * challenge from one invite cannot be finished with another invite's
-   * token. The invite is spent under its lock, so concurrent or replayed
+   * token. The invite is claimed under its lock, so concurrent or replayed
    * finishes cannot both get it, and the pre-generated user id makes the
    * identity write single-winner as well. A failed verification leaves the
    * invite pending. If the identity write fails with a retryable error
-   * (store_busy, store_full) no user exists, so the invite is put back;
-   * any other failure leaves it spent.
+   * (store_busy, store_full) no user exists, so the claim is cleared, unless
+   * the owner revoked the invite meanwhile; any other failure leaves it
+   * claimed until the claim lease runs out and it is pruned.
    *
    * @returns {Readonly<{ userId: string, role: 'member', credentialId: string, credentialLabel: string, inviteId: string }>}
    */
@@ -197,12 +199,17 @@ export const createPasskeyCeremonies = ({
     } catch (error) {
       if (error instanceof IdentityStoreError && RETRYABLE_ENROLLMENT.has(error.code)) {
         try {
-          pending.restore(token, invite);
+          pending.restore(token, invite.id);
         } catch {
-          // The invite stays spent; the owner can create a new one.
+          // The invite stays claimed until it is pruned; the owner can create a new one.
         }
       }
       throw error;
+    }
+    try {
+      pending.complete(token, invite.id);
+    } catch {
+      // The member exists. The claim hides the invite until it is pruned.
     }
     return Object.freeze({
       userId: created.user.id, role: created.user.role, credentialId: created.credential.id, credentialLabel: created.credential.label, inviteId: invite.id,

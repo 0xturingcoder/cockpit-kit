@@ -1,7 +1,7 @@
 // Invites store (skill/lib/identity/invites.mjs): hashing, single use,
 // expiry with an injected clock, pruning, the pending cap, revocation,
-// restoring after a retryable failure, fail-closed loading, and two processes
-// spending one invite at once. Users are invented; tokens are generated at
+// claims (complete, restore, the claim lease, revoke winning over restore),
+// fail-closed loading, and two processes spending one invite at once. Users are invented; tokens are generated at
 // runtime.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  DEFAULT_INVITE_LIFETIME_MS, InviteStoreError, MAX_PENDING_INVITES, openInviteStore, validateInvitesData,
+  CLAIM_LEASE_MS, DEFAULT_INVITE_LIFETIME_MS, InviteStoreError, MAX_PENDING_INVITES, openInviteStore, validateInvitesData,
 } from '../skill/lib/identity/invites.mjs';
 import { hashToken } from '../skill/lib/identity/sessions.mjs';
 
@@ -89,7 +89,69 @@ test('invites: spend is single use and requires the matching invite id', () => {
   assert.equal(invites.spend(a.token, a.invite.id), null, 'replay: the second spend gets nothing');
   assert.equal(invites.find(a.token), null);
   assert.deepEqual(invites.list(), [b.invite]);
-  assert.ok(!fs.readFileSync(file, 'utf8').includes(hashToken(a.token)), 'a spent invite is deleted');
+  assert.ok(invites.complete(a.token, a.invite.id), 'complete deletes the claimed invite');
+  assert.ok(!fs.readFileSync(file, 'utf8').includes(hashToken(a.token)), 'a completed invite is deleted');
+  assert.equal(invites.complete(a.token, a.invite.id), false, 'only once');
+  assert.equal(invites.restore(a.token, a.invite.id), false, 'a completed invite cannot be restored');
+  assert.equal(invites.find(a.token), null);
+});
+
+test('invites: a claimed invite is hidden from find, list, and spend, and the claim is stored deliberately', () => {
+  const { root, file } = layout();
+  const c = clock();
+  const invites = openInviteStore({ file, root, now: c.now });
+  const a = invites.create({ displayName: 'Test Member', createdBy: OWNER });
+  const b = invites.create({ displayName: 'Other Member', createdBy: OWNER });
+  c.at += 1000;
+  assert.deepEqual(invites.spend(a.token, a.invite.id), a.invite, 'the claim is not part of the public invite');
+  const stored = invites.load().invites.find((invite) => invite.id === a.invite.id);
+  assert.equal(stored.claimed_at, new Date(c.at).toISOString());
+  assert.equal(invites.find(a.token), null);
+  assert.deepEqual(invites.list(), [b.invite]);
+  assert.equal(invites.spend(a.token, a.invite.id), null);
+  assert.equal(invites.complete(b.token, b.invite.id), false, 'an unclaimed invite cannot be completed');
+  assert.equal(invites.restore(b.token, b.invite.id), false, 'or restored');
+  assert.equal(invites.complete(a.token, b.invite.id), false, "a token cannot complete another invite's id");
+  assert.equal(invites.restore(b.token, a.invite.id), false);
+  for (const bad of [undefined, 'short', a.invite.id]) assert.equal(invites.restore(bad, a.invite.id), false);
+  assert.equal(invites.restore(a.token, undefined), false);
+  assert.equal(invites.find(a.token), null, 'still claimed');
+});
+
+test('invites: revoke wins over restore: spend, revoke, then restore returns false and the invite stays gone', () => {
+  const { root, file } = layout();
+  const invites = openInviteStore({ file, root });
+  const { token, invite } = invites.create({ displayName: 'Test Member', createdBy: OWNER });
+  assert.deepEqual(invites.spend(token, invite.id), invite);
+  assert.deepEqual(invites.revoke(invite.id), invite, 'a claimed invite can be revoked');
+  assert.equal(invites.restore(token, invite.id), false);
+  assert.equal(invites.find(token), null);
+  assert.equal(invites.spend(token, invite.id), null);
+  assert.deepEqual(invites.load().invites, []);
+});
+
+test('invites: a claim lasts at most the claim lease, then the invite is pruned rather than restored', () => {
+  const { root, file } = layout();
+  const c = clock();
+  const invites = openInviteStore({ file, root, now: c.now, lifetimeMs: HOUR });
+  const { token, invite } = invites.create({ displayName: 'Test Member', createdBy: OWNER });
+  invites.spend(token, invite.id);
+  c.at += CLAIM_LEASE_MS - 1;
+  assert.equal(invites.load().invites.length, 1, 'within the lease the claim holds a slot');
+  assert.equal(invites.restore(token, invite.id), true, 'and can be restored');
+  invites.spend(token, invite.id);
+  c.at += CLAIM_LEASE_MS;
+  assert.equal(invites.restore(token, invite.id), false, 'after the lease the claim is gone');
+  assert.deepEqual(invites.load().invites, [], 'and was pruned by that write');
+  assert.equal(invites.find(token), null);
+  assert.equal(invites.revoke(invite.id), null);
+
+  // A claim left behind by a process that died is pruned by any other write.
+  const other = invites.create({ displayName: 'Other Member', createdBy: OWNER });
+  invites.spend(other.token, other.invite.id);
+  c.at += CLAIM_LEASE_MS;
+  invites.create({ displayName: 'Third Member', createdBy: OWNER });
+  assert.ok(!fs.readFileSync(file, 'utf8').includes(other.invite.id));
 });
 
 test('invites: expiry is checked against the clock, and expired invites are pruned on the next write', () => {
@@ -154,19 +216,21 @@ test('invites: create validates the display name and creator', () => {
   assert.equal(invites.create({ displayName: 'x'.repeat(128), createdBy: OWNER }).invite.display_name.length, 128);
 });
 
-test('invites: restore puts a spent invite back only while it is live and unique', () => {
+test('invites: restore clears a claim only while the invite is live', () => {
   const { root, file } = layout();
   const c = clock();
   const invites = openInviteStore({ file, root, now: c.now, lifetimeMs: HOUR });
   const { token, invite } = invites.create({ displayName: 'Test Member', createdBy: OWNER });
-  const spent = invites.spend(token, invite.id);
-  assert.equal(invites.restore(token, spent), true);
-  assert.deepEqual(invites.find(token), invite);
-  assert.equal(invites.restore(token, spent), false, 'not twice');
-  assert.equal(invites.list().length, 1);
   invites.spend(token, invite.id);
-  c.at += HOUR;
-  assert.equal(invites.restore(token, spent), false, 'not after expiry');
+  assert.equal(invites.restore(token, invite.id), true);
+  assert.deepEqual(invites.find(token), invite);
+  assert.deepEqual(invites.load().invites.map((record) => Object.hasOwn(record, 'claimed_at')), [false], 'the claim is removed');
+  assert.equal(invites.restore(token, invite.id), false, 'not twice');
+  assert.equal(invites.list().length, 1);
+  c.at += HOUR - 1000;
+  invites.spend(token, invite.id);
+  c.at += 1000;
+  assert.equal(invites.restore(token, invite.id), false, 'not after expiry');
   assert.equal(invites.find(token), null);
 });
 
@@ -180,6 +244,11 @@ test('invites: loading fails closed on unknown fields, bad values, and unsupport
     [{ ...good, schema_version: 2 }, 'unsupported_schema'],
     [{ ...good, invites: [{ ...good.invites[0], token: 'x' }] }, 'invalid_store'],
     [{ ...good, invites: [{ ...good.invites[0], role: 'owner' }] }, 'invalid_store'],
+    [{ ...good, invites: [{ ...good.invites[0], claimed: true }] }, 'invalid_store'],
+    [{ ...good, invites: [{ ...good.invites[0], claimed_at: true }] }, 'invalid_store'],
+    [{ ...good, invites: [{ ...good.invites[0], claimed_at: '2026-03-04' }] }, 'invalid_store'],
+    [{ ...good, invites: [{ ...good.invites[0], claimed_at: new Date(Date.parse(good.invites[0].created_at) - 1).toISOString() }] }, 'invalid_store'],
+    [{ ...good, invites: [{ ...good.invites[0], claimed_at: good.invites[0].expires_at }] }, 'invalid_store'],
     [{ ...good, invites: [{ ...good.invites[0], token_hash: 'short' }] }, 'invalid_store'],
     [{ ...good, invites: [{ ...good.invites[0], expires_at: good.invites[0].created_at }] }, 'invalid_store'],
     [{ ...good, invites: [good.invites[0], { ...good.invites[0], id: 'inv_BBBBBBBBBBBBBBBBBBBBBB' }] }, 'duplicate_id'],
@@ -194,6 +263,8 @@ test('invites: loading fails closed on unknown fields, bad values, and unsupport
   fs.writeFileSync(file, '{not json', { mode: 0o600 });
   assert.throws(() => invites.list(), (error) => error instanceof InviteStoreError && !error.message.includes('not json'));
   assert.deepEqual(validateInvitesData(good), good);
+  const claimed = { ...good, invites: [{ ...good.invites[0], claimed_at: good.invites[0].created_at }] };
+  assert.deepEqual(validateInvitesData(claimed), claimed);
 });
 
 test('invites: the file must be outside the root, private, and not a symlink', posixOnly, () => {
@@ -264,4 +335,29 @@ test('invites: two processes spending the same invite at once: exactly one wins'
   assert.equal(wins.reduce((a, b) => a + b, 0), 1, `exactly one spend succeeded: ${wins}`);
   assert.deepEqual(invites.list(), []);
   assert.deepEqual(fs.readdirSync(path.dirname(file)).filter((name) => name !== 'invites.json'), []);
+});
+
+test('invites: a revoke from another process while an enrollment holds the claim wins over the restore', async () => {
+  const { root, file } = layout();
+  const invites = openInviteStore({ file, root });
+  const { token, invite } = invites.create({ displayName: 'Test Member', createdBy: OWNER });
+  assert.deepEqual(invites.spend(token, invite.id), invite);
+  const url = new URL('../skill/lib/identity/invites.mjs', import.meta.url).href;
+  const script = `
+    import { openInviteStore } from ${JSON.stringify(url)};
+    const [file, root, inviteId] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify(openInviteStore({ file, root }).revoke(inviteId)));`;
+  const revoked = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, file, root, invite.id], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('exit', (code) => (code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(`revoker exited ${code}: ${stderr}`))));
+  });
+  assert.deepEqual(revoked, invite, 'the other process revoked the claimed invite');
+  assert.equal(invites.restore(token, invite.id), false);
+  assert.equal(invites.find(token), null);
+  assert.equal(invites.spend(token, invite.id), null);
 });

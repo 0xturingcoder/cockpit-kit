@@ -10,12 +10,20 @@
 //   user id, a display name, and the member role. The user is created only
 //   at enrollment, so an unused invite leaves nothing behind.
 // - Invites expire at a fixed time (created + lifetime, 24 hours by default).
-//   Spending or revoking an invite deletes it, and expired invites are
+//   Revoking or completing an invite deletes it, and expired invites are
 //   ignored on read and pruned on every write, so a spent, revoked, or
 //   expired invite looks exactly like one that never existed.
-// - spend() deletes the invite under the file lock after re-reading the
+// - spend() claims the invite under the file lock after re-reading the
 //   file, so of any number of concurrent spends (in any process) exactly one
-//   gets the invite.
+//   gets the invite. A claimed invite is hidden from find, list, and spend,
+//   exactly like a deleted one. complete() deletes it after the member is
+//   created; restore() clears the claim after a retryable failure.
+// - Revoke always wins: revoke() deletes a claimed invite too, and restore()
+//   only clears a claim on a record that still exists, so an invite revoked
+//   while an enrollment holds its claim never comes back.
+// - A claim lasts at most CLAIM_LEASE_MS. A claim left by a process that
+//   died is pruned (the invite is gone, not restored) on the next write once
+//   the lease runs out, and expiry prunes it in any case.
 // - File safety (0600, atomic rename, lock file, size cap, fail closed) is
 //   shared with the identity and sessions stores through private-file.mjs.
 import crypto from 'node:crypto';
@@ -32,6 +40,7 @@ export const DEFAULT_INVITE_LIFETIME_MS = DAY_MS;
 export const MIN_INVITE_LIFETIME_MS = 5 * MINUTE_MS;
 export const MAX_INVITE_LIFETIME_MS = 7 * DAY_MS;
 export const MAX_PENDING_INVITES = 32;
+export const CLAIM_LEASE_MS = 5 * MINUTE_MS;
 const DEFAULT_LOCK_WAIT_MS = 1000;
 const DEFAULT_LOCK_STALE_MS = 30000;
 
@@ -42,6 +51,8 @@ const HASH_RE = /^[A-Za-z0-9_-]{43}$/;
 const USER_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const STORE_KEYS = ['schema_version', 'invites'];
 const INVITE_KEYS = ['id', 'token_hash', 'user_id', 'display_name', 'role', 'created_by', 'created_at', 'expires_at'];
+// Present only while an enrollment holds the invite (spend to complete or restore).
+const OPTIONAL_INVITE_KEYS = ['claimed_at'];
 
 export class InviteStoreError extends Error {
   constructor(message, code = 'invalid_store') {
@@ -71,7 +82,7 @@ const checkTimestamp = (value, at) => {
 const checkInvite = (invite, at) => {
   if (!isPlainObject(invite)) fail(`${at} must be an object`);
   for (const key of INVITE_KEYS) if (!Object.hasOwn(invite, key)) fail(`${at} is missing ${key}`);
-  for (const key of Object.keys(invite)) if (!INVITE_KEYS.includes(key)) fail(`${at} has an unknown field`);
+  for (const key of Object.keys(invite)) if (!INVITE_KEYS.includes(key) && !OPTIONAL_INVITE_KEYS.includes(key)) fail(`${at} has an unknown field`);
   if (typeof invite.id !== 'string' || !INVITE_ID_RE.test(invite.id)) fail(`${at}.id must be inv_ followed by 22 base64url characters`);
   if (typeof invite.token_hash !== 'string' || !HASH_RE.test(invite.token_hash)) fail(`${at}.token_hash must be a base64url SHA-256 hash`);
   if (typeof invite.user_id !== 'string' || !USER_ID_RE.test(invite.user_id)) fail(`${at}.user_id must be a user id`);
@@ -81,6 +92,11 @@ const checkInvite = (invite, at) => {
   if (typeof invite.created_by !== 'string' || !USER_ID_RE.test(invite.created_by)) fail(`${at}.created_by must be a user id`);
   for (const key of ['created_at', 'expires_at']) checkTimestamp(invite[key], `${at}.${key}`);
   if (Date.parse(invite.expires_at) <= Date.parse(invite.created_at)) fail(`${at}.expires_at must be after created_at`);
+  if (Object.hasOwn(invite, 'claimed_at')) {
+    checkTimestamp(invite.claimed_at, `${at}.claimed_at`);
+    const claimed = Date.parse(invite.claimed_at);
+    if (claimed < Date.parse(invite.created_at) || claimed >= Date.parse(invite.expires_at)) fail(`${at}.claimed_at must be from created_at to before expires_at`);
+  }
 };
 
 /**
@@ -109,14 +125,21 @@ export const validateInvitesData = (data) => {
   return data;
 };
 
-/** The invite fields that are safe to show: everything except the token hash. */
-export const publicInvite = ({ token_hash: _hash, ...rest }) => ({ ...rest });
+/** The invite fields that are safe to show: everything except the token hash and the claim. */
+export const publicInvite = ({ token_hash: _hash, claimed_at: _claim, ...rest }) => ({ ...rest });
 
 const EMPTY = Object.freeze({ schema_version: INVITES_SCHEMA_VERSION, invites: Object.freeze([]) });
 
 const iso = (ms) => new Date(ms).toISOString();
 
-const isLive = (invite, nowMs) => Date.parse(invite.expires_at) > nowMs;
+const isClaimed = (invite) => Object.hasOwn(invite, 'claimed_at');
+
+// Kept on the next write: not expired, and any claim is within its lease.
+const isLive = (invite, nowMs) => Date.parse(invite.expires_at) > nowMs
+  && (!isClaimed(invite) || Date.parse(invite.claimed_at) + CLAIM_LEASE_MS > nowMs);
+
+// Usable by an invite link: live and not claimed.
+const isPending = (invite, nowMs) => isLive(invite, nowMs) && !isClaimed(invite);
 
 // A token that could never have been issued is not hashed or looked up.
 const tokenHash = (token) => (typeof token === 'string' && INVITE_TOKEN_RE.test(token) ? hashToken(token) : null);
@@ -196,9 +219,9 @@ export const openInviteStore = ({
     });
   };
 
-  const liveInvites = () => {
+  const pendingInvites = () => {
     const nowMs = now();
-    return readCurrent().invites.filter((invite) => isLive(invite, nowMs));
+    return readCurrent().invites.filter((invite) => isPending(invite, nowMs));
   };
 
   /**
@@ -210,6 +233,8 @@ export const openInviteStore = ({
     if (typeof createdBy !== 'string' || !USER_ID_RE.test(createdBy)) fail('createdBy must be a user id', 'invalid_argument');
     const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
     return mutate((invites, nowMs) => {
+      // Claimed invites still take a slot until they are completed, restored,
+      // revoked, or pruned.
       if (invites.length >= MAX_PENDING_INVITES) fail(`There are already ${MAX_PENDING_INVITES} pending invites; revoke one first`, 'too_many_invites');
       const invite = {
         id: `inv_${crypto.randomBytes(16).toString('base64url')}`,
@@ -229,42 +254,51 @@ export const openInviteStore = ({
   const find = (token) => {
     const hash = tokenHash(token);
     if (!hash) return null;
-    const invite = liveInvites().find((candidate) => candidate.token_hash === hash);
+    const invite = pendingInvites().find((candidate) => candidate.token_hash === hash);
     return invite ? publicInvite(invite) : null;
   };
 
+  // Replace the claimed record for `token` and `inviteId` (if it still
+  // exists) with `next(record)`, or drop it when `next` returns null.
+  const settle = (token, inviteId, next) => {
+    const hash = tokenHash(token);
+    if (!hash || typeof inviteId !== 'string') return false;
+    return mutate((invites) => {
+      const invite = invites.find((candidate) => candidate.token_hash === hash && candidate.id === inviteId && isClaimed(candidate));
+      if (!invite) return { invites, result: false, changed: false };
+      const replacement = next(invite);
+      return { invites: invites.flatMap((candidate) => (candidate !== invite ? [candidate] : replacement ? [replacement] : [])), result: true };
+    });
+  };
+
   /**
-   * Use up the invite for `token`, which must be the pending invite
-   * `inviteId`. Deletes it under the lock and returns the public invite, or
-   * returns null without writing if there is no such pending invite.
+   * Claim the invite for `token`, which must be the pending invite
+   * `inviteId`. Marks it claimed under the lock and returns the public
+   * invite, or returns null without writing if there is no such pending
+   * invite. Follow with complete() or restore().
    */
   const spend = (token, inviteId) => {
     const hash = tokenHash(token);
     if (!hash) return null;
-    return mutate((invites) => {
-      const invite = invites.find((candidate) => candidate.token_hash === hash);
+    return mutate((invites, nowMs) => {
+      const invite = invites.find((candidate) => candidate.token_hash === hash && !isClaimed(candidate));
       if (!invite || invite.id !== inviteId) return { invites, result: null, changed: false };
-      return { invites: invites.filter((candidate) => candidate !== invite), result: publicInvite(invite) };
+      const claimed = { ...invite, claimed_at: iso(nowMs) };
+      return { invites: invites.map((candidate) => (candidate === invite ? claimed : candidate)), result: publicInvite(invite) };
     });
   };
+
+  /** Delete a claimed invite once its member exists. Returns true when it was deleted. */
+  const complete = (token, inviteId) => settle(token, inviteId, () => null);
 
   /**
-   * Put back an invite that spend() returned, after a retryable failure
-   * created no user. Only if it has not expired meanwhile and there is room.
-   * Returns true when it was restored.
+   * Clear the claim spend() set, after a retryable failure created no user.
+   * Only if the record still exists: a revoked, expired, or pruned invite
+   * stays gone. Returns true when it was restored.
    */
-  const restore = (token, invite) => {
-    const hash = tokenHash(token);
-    if (!hash || !isPlainObject(invite)) return false;
-    const record = { ...invite, token_hash: hash };
-    checkInvite(record, 'invite');
-    return mutate((invites, nowMs) => {
-      const clash = invites.some((candidate) => [candidate.id, candidate.token_hash, candidate.user_id].some((value) => [record.id, record.token_hash, record.user_id].includes(value)));
-      if (!isLive(record, nowMs) || clash || invites.length >= MAX_PENDING_INVITES) return { invites, result: false, changed: false };
-      return { invites: [...invites, record], result: true };
-    });
-  };
+  const restore = (token, inviteId) => settle(token, inviteId, ({ claimed_at: _claim, ...rest }) => rest);
 
+  /** Delete an invite, pending or claimed. Returns the public invite, or null if there is none. */
   const revoke = (inviteId) => mutate((invites) => {
     const invite = invites.find((candidate) => candidate.id === inviteId);
     if (!invite) return { invites, result: null, changed: false };
@@ -276,9 +310,10 @@ export const openInviteStore = ({
     lifetimeMs,
     load: () => structuredClone(readCurrent()),
     create,
-    list: () => liveInvites().map(publicInvite),
+    list: () => pendingInvites().map(publicInvite),
     find,
     spend,
+    complete,
     restore,
     revoke,
   });
@@ -294,12 +329,13 @@ export const openInviteStore = ({
  * @property {string} created_by User id of the owner who created it.
  * @property {string} created_at
  * @property {string} expires_at
+ * @property {string} [claimed_at] Set by spend() until complete() or restore().
  *
  * @typedef {object} InvitesData
  * @property {1} schema_version
  * @property {StoredInvite[]} invites
  *
- * @typedef {Omit<StoredInvite, 'token_hash'>} PublicInvite
+ * @typedef {Omit<StoredInvite, 'token_hash' | 'claimed_at'>} PublicInvite
  *
  * @typedef {object} InviteStore
  * @property {string} file
@@ -309,6 +345,7 @@ export const openInviteStore = ({
  * @property {() => PublicInvite[]} list Pending invites.
  * @property {(token: string) => PublicInvite | null} find
  * @property {(token: string, inviteId: string) => PublicInvite | null} spend
- * @property {(token: string, invite: PublicInvite) => boolean} restore
+ * @property {(token: string, inviteId: string) => boolean} complete
+ * @property {(token: string, inviteId: string) => boolean} restore
  * @property {(inviteId: string) => PublicInvite | null} revoke
  */
