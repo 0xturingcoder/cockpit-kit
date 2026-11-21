@@ -525,7 +525,7 @@ test('a writer whose lock was taken over writes nothing and leaves the new lock 
   assertRejects(() => store.createUser({ displayName: 'Test Member' }), 'store_busy');
   assert.deepEqual(fs.readFileSync(file), before, 'nothing was written');
   assert.equal(fs.readFileSync(lockFile, 'utf8'), 'new-owner', 'release did not delete the new owner\'s lock');
-  assert.deepEqual(tempFiles(path.dirname(file)).filter((name) => name !== 'identity.json.lock'), []);
+  assert.deepEqual(tempFiles(path.dirname(file)), ['identity.json.lock'], 'only the new owner\'s lock is left');
 });
 
 test('only one writer wins a stale lock; a lock re-taken in between is put back', (t) => {
