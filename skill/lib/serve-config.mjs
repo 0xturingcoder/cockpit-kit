@@ -3,6 +3,9 @@ import path from 'node:path';
 import { ArgumentError, resolveRoot, validateCockpitRoot } from './config.mjs';
 import { parseToml } from './toml.mjs';
 import { normalizeOrigin, normalizeOrigins } from './intents/origins.mjs';
+import { stateDirFor } from './intents/store.mjs';
+import { IDENTITY_STORE_FILE, IdentityStoreError, assertOutsideRoot } from './identity/store.mjs';
+import { expandHome } from './paths.mjs';
 
 export const DEFAULT_SERVE_HOST = '127.0.0.1';
 export const DEFAULT_SERVE_PORT = 18765;
@@ -76,6 +79,11 @@ function parseArgs(argv) {
       flags.webhookUrl = takeValue(argv, index, arg);
       index += 1;
     } else if (arg.startsWith('--webhook-url=')) flags.webhookUrl = arg.slice('--webhook-url='.length);
+    else if (arg === '--identity-store') {
+      const pathValue = takePathValue(argv, index, arg);
+      flags.identityStore = pathValue.value;
+      index = pathValue.index;
+    } else if (arg.startsWith('--identity-store=')) flags.identityStore = arg.slice('--identity-store='.length);
     else if (arg === '--no-auth') flags.auth = false;
     else if (arg === '--auth') flags.auth = true;
     else if (arg === '--root' || arg === '--cockpit-root') {
@@ -105,9 +113,50 @@ function serveFileOptions(values) {
     if (typeof values.auth !== 'boolean') throw new ArgumentError('.cockpit/serve.toml auth must be true or false');
     options.auth = values.auth;
   }
+  if (Object.hasOwn(values, 'identity_store')) {
+    if (typeof values.identity_store !== 'string' || values.identity_store === '') throw new ArgumentError('.cockpit/serve.toml identity_store must be a non-empty path string');
+    options.identityStore = values.identity_store;
+  }
   return options;
 }
 
+function defaultIdentityStore(root, env) {
+  const hasStateBase = (env.XDG_STATE_HOME && env.XDG_STATE_HOME.trim() !== '') || env.HOME;
+  return hasStateBase ? path.join(stateDirFor(root, env), IDENTITY_STORE_FILE) : null;
+}
+
+function checkOutsideRoot(file, root, source) {
+  try {
+    return path.resolve(assertOutsideRoot(file, root, source));
+  } catch (error) {
+    if (error instanceof IdentityStoreError) throw new ArgumentError(error.message);
+    throw error;
+  }
+}
+
+// The identity store holds credentials, so it must never be servable: the
+// path must be absolute (or start with ~/) and resolve outside the root. The
+// default state-dir path is checked too, since XDG_STATE_HOME or HOME can
+// point inside the root.
+export function resolveIdentityStorePath(value, { root, env, source }) {
+  if (value === undefined) {
+    const fallback = defaultIdentityStore(root, env);
+    return fallback && checkOutsideRoot(fallback, root, 'default identity store (XDG_STATE_HOME or HOME state dir)');
+  }
+  const expanded = expandHome(value, env);
+  if (!path.isAbsolute(expanded)) throw new ArgumentError(`${source} must be an absolute path or start with ~/`);
+  return checkOutsideRoot(expanded, root, source);
+}
+
+/**
+ * Resolve serve options from argv, the user config, and .cockpit/serve.toml.
+ *
+ * `identityStore` in the result is the absolute identity store path, always
+ * outside the served root (startup fails otherwise, including for the default
+ * path). It is null when no path is configured and neither HOME nor
+ * XDG_STATE_HOME is set. Callers must treat null as "identity disabled" and
+ * fail closed: no passkey sign-in, never a fallback location.
+ */
 export function parseServeConfig({ argv = [], env, stderr } = {}) {
   if (!env) throw new Error('parseServeConfig requires an explicit env object');
   const flags = parseArgs(argv);
@@ -121,6 +170,8 @@ export function parseServeConfig({ argv = [], env, stderr } = {}) {
 
   const auth = flags.auth ?? fileOptions.auth ?? true;
   const write = flags.write === true;
+  const identityStoreSource = flags.identityStore !== undefined ? '--identity-store' : '.cockpit/serve.toml identity_store';
+  const identityStore = resolveIdentityStorePath(flags.identityStore ?? fileOptions.identityStore, { root, env, source: identityStoreSource });
   if (write && !auth) throw new ArgumentError('serve --write requires authentication; --write --no-auth is not supported');
   return {
     root,
@@ -131,6 +182,7 @@ export function parseServeConfig({ argv = [], env, stderr } = {}) {
     host: flags.host ?? fileOptions.host ?? DEFAULT_SERVE_HOST,
     port: flags.port ?? fileOptions.port ?? DEFAULT_SERVE_PORT,
     auth,
+    identityStore,
     configPath: resolved.configPath,
     source: resolved.source,
     serveConfigPath: serveFile.file,

@@ -155,6 +155,16 @@ The file is read once at startup. The server refuses to start if the file is a s
 
 This is a lean first version of the [design](docs/design/operator-comments-and-capture.md); see its "MVP implementation status" section for what is deferred.
 
+## Users and credentials store
+
+Groundwork for passkey sign-in: `skill/lib/identity/store.mjs` keeps users (stable opaque id, display name, `owner` or `member` role) and their passkey credentials (credential id, COSE public key, signature counter, transports, created time, label) in one private JSON file per knowledge repo. Nothing uses it for sign-in yet.
+
+- **Where:** `${XDG_STATE_HOME:-~/.local/state}/cockpit-kit/<repo-hash>/identity.json` by default. Override it with `serve.mjs --identity-store <path>` or `identity_store = "<path>"` in `.cockpit/serve.toml`. The path must be absolute (or start with `~/`) and must resolve outside the served root, comparing real paths; otherwise `serve.mjs` refuses to start.
+- **Behavior change:** this check runs at every `serve.mjs` start, even though nothing uses identity yet, and it covers the default path. If the served root is at or above `$HOME` (or above `XDG_STATE_HOME`), `serve.mjs` now refuses to start. Serve a narrower root, or set `--identity-store` to a path outside the root.
+- **Safety:** writes are atomic (fsynced `0600` temp file, then rename), serialized by a short token lock, and capped at 1 MiB (`store_full`). Loading refuses symlinks and files with any group or world permission bit (`chmod 600`), and fails closed on anything invalid, including a store without exactly one `owner`. Error messages never include credential material.
+
+Schema, API, and error codes: [`docs/identity-store.md`](docs/identity-store.md).
+
 ## Themes: Light, Dark, System
 
 The starter knowledge repo ships a light and a dark palette and a compact theme switcher on every starter page: three small icon buttons (System, Light, Dark) fixed in the top-right corner of the viewport.
@@ -196,6 +206,7 @@ The GitHub Actions workflow runs `node --test` on Ubuntu and macOS with Node 20 
 ## Documentation
 
 - Page contract: [`skill/reference/page-contract.md`](skill/reference/page-contract.md)
+- Users and credentials store (schema and API): [`docs/identity-store.md`](docs/identity-store.md)
 - Design (lean MVP implemented, hardening deferred): [Operator comments and capture lifecycle](docs/design/operator-comments-and-capture.md) ([#10](https://github.com/autojeremy/cockpit-kit/issues/10)).
 
 ## Security
