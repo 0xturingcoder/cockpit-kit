@@ -35,9 +35,10 @@ export const serveConfig = (layout, extra = []) => ({
   testEnv: layout.env,
 });
 
-export const withServe = async (config, fn) => {
+// `log` receives the server's log lines; `now` is the invite expiry clock.
+export const withServe = async (config, fn, { log = () => {}, now } = {}) => {
   const token = crypto.randomBytes(32).toString('hex');
-  const server = createServeServer(config, { token, log: () => {}, env: config.testEnv ?? process.env });
+  const server = createServeServer(config, { token, log, env: config.testEnv ?? process.env, ...(now ? { now } : {}) });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { port } = server.address();
