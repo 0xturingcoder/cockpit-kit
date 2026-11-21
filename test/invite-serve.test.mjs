@@ -19,7 +19,8 @@ import { hashToken } from '../skill/lib/identity/sessions.mjs';
 import { MAX_FILE_BYTES, findUser, openIdentityStore } from '../skill/lib/identity/store.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
 import { makeCredential, registrationResponse } from './support/webauthn-synthetic.mjs';
-import { call, makeServeRoot, registerOwner, serveConfig, signIn, withServe } from './support/serve-harness.mjs';
+import { openRecoveryStore } from '../skill/lib/identity/recovery.mjs';
+import { call, makeServeRoot, registerOwner, serveConfig, signIn, stepUp, withServe } from './support/serve-harness.mjs';
 
 const HOUR = 60 * 60 * 1000;
 const OWNER_ID = 'usr_ownerEXAMPLEonly0001';
@@ -28,17 +29,24 @@ const post = (ctx, pathname, { cookie, csrf, body = {}, origin = ctx.origin, hea
   port: ctx.port, method: 'POST', pathname, body, origin, cookie, headers: { ...(csrf ? { 'X-Cockpit-CSRF': csrf } : {}), ...headers },
 });
 
-// The owner (registered with the server token) signed in with a passkey.
+// The owner (created with the recovery token) signed in with a passkey.
 const ownerSession = async (ctx) => {
   const key = makeCredential();
   const owner = await registerOwner(ctx, key);
   const { cookie } = await signIn(ctx, key, owner.user_id);
   const account = await call({ port: ctx.port, pathname: '/auth/account', cookie });
-  return { cookie, csrf: account.json.csrf_token, userId: owner.user_id };
+  return { cookie, csrf: account.json.csrf_token, userId: owner.user_id, key };
 };
 
+// Create an invite; like the settings page, step up and retry when the
+// session's step-up is no longer fresh (for example after the test clock moved).
 const createInvite = async (ctx, owner, displayName = 'Test Member') => {
-  const res = await post(ctx, '/auth/account/invites', { cookie: owner.cookie, csrf: owner.csrf, body: { display_name: displayName } });
+  const send = () => post(ctx, '/auth/account/invites', { cookie: owner.cookie, csrf: owner.csrf, body: { display_name: displayName } });
+  let res = await send();
+  if (res.status === 403 && res.json?.error?.code === 'step_up_required') {
+    assert.equal((await stepUp(ctx, owner, owner.key, owner.userId)).status, 200);
+    res = await send();
+  }
   assert.equal(res.status, 201, res.text);
   const token = res.json.url.split('#')[1];
   return { res, token, invite: res.json.invite };
@@ -654,6 +662,8 @@ test('invites: the token never appears in log lines or in any response except th
 test('invites: serve.mjs never writes an invite token or its hash to stderr or stdout', async () => {
   const layout = makeServeRoot();
   const script = path.resolve(import.meta.dirname, '..', 'skill', 'scripts', 'serve.mjs');
+  // A non-interactive start does not create the recovery token; create it as an operator would.
+  const { token: recoveryToken } = openRecoveryStore({ file: path.join(layout.base, 'state', 'recovery.json'), root: layout.root }).ensure();
   const child = spawn(process.execPath, [script, '--passkeys', '--identity-store', layout.identityStore, '--port', '0'], {
     env: layout.env, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -673,7 +683,7 @@ test('invites: serve.mjs never writes an invite token or its hash to stderr or s
       child.on('exit', () => reject(new Error(`serve.mjs exited: ${stderr}`)));
     });
     const port = Number(url.port);
-    const ctx = { port, token: url.searchParams.get('token'), origin: `http://localhost:${port}` };
+    const ctx = { port, recoveryToken, origin: `http://localhost:${port}` };
     const owner = await ownerSession(ctx);
     const a = await createInvite(ctx, owner);
     const b = await createInvite(ctx, owner, 'Other Member');
@@ -689,7 +699,7 @@ test('invites: serve.mjs never writes an invite token or its hash to stderr or s
     child.kill('SIGTERM');
     await exited;
     assert.match(stderr, /invite_invalid/, 'the refusals were logged');
-    for (const secret of [a.token, b.token, hashToken(a.token), hashToken(b.token)]) {
+    for (const secret of [a.token, b.token, hashToken(a.token), hashToken(b.token), recoveryToken, hashToken(recoveryToken)]) {
       assert.ok(!stderr.includes(secret), 'stderr leaks a token');
       assert.ok(!stdout.includes(secret), 'stdout leaks a token');
     }
@@ -728,7 +738,11 @@ const apiSetup = () => {
   const ceremonies = createPasskeyCeremonies({ store, rpId: 'example.com', origins: ['https://example.com'], invites, challenges: createChallengeStore() });
   const clock = { at: 0 };
   const api = createPasskeyApi({
-    ceremonies, allowedOrigins: () => ['https://example.com'], isOperator: (req) => req.headers.cookie === 'operator', onSignIn: () => ({}), now: () => clock.at,
+    ceremonies,
+    allowedOrigins: () => ['https://example.com'],
+    authorizeRegistration: (req) => (req.headers.cookie === 'operator' ? { userId: OWNER_ID, sessionId: 'ses_EXAMPLEonlyAAAAAAAAAAA' } : null),
+    onSignIn: () => ({}),
+    now: () => clock.at,
   });
   return { api, invites, clock };
 };

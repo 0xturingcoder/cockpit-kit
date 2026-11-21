@@ -12,7 +12,7 @@ import { IntentStore } from '../skill/lib/intents/store.mjs';
 import { deviceLabel } from '../skill/lib/identity/session-http.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
 import { makeCredential } from './support/webauthn-synthetic.mjs';
-import { call, makeServeRoot, registerOwner, serveConfig, signIn, withServe } from './support/serve-harness.mjs';
+import { call, makeServeRoot, recoverySignIn, registerOwner, serveConfig, signIn, withServe } from './support/serve-harness.mjs';
 
 const account = (ctx, cookie) => call({ port: ctx.port, pathname: '/auth/account', cookie });
 
@@ -406,19 +406,20 @@ test('serve sessions: the settings page is served with the login page security h
   });
 });
 
-test('serve sessions: intents routes accept an owner passkey session with a session-bound CSRF token', async () => {
+test('serve sessions: intents routes accept an owner passkey or recovery session with a session-bound CSRF token, and not the server token', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout, ['--write']), async (ctx) => {
     const { ownerKey, ownerId, member, memberKey } = await setup(ctx, layout);
     const ownerA = await signIn(ctx, ownerKey, ownerId);
     const ownerB = await signIn(ctx, ownerKey, ownerId);
+    const recovery = await recoverySignIn(ctx);
     const caps = await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: ownerA.cookie });
     assert.equal(caps.status, 200, caps.text);
     const csrfA = caps.json.csrf_token;
     assert.equal(csrfA, (await account(ctx, ownerA.cookie)).json.csrf_token, 'one CSRF token per session for both APIs');
     const csrfB = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: ownerB.cookie })).json.csrf_token;
-    const csrfToken = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: `cockpit_serve=${ctx.token}` })).json.csrf_token;
-    assert.equal(new Set([csrfA, csrfB, csrfToken]).size, 3);
+    const csrfRecovery = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: recovery.cookie })).json.csrf_token;
+    assert.equal(new Set([csrfA, csrfB, csrfRecovery]).size, 3);
 
     const capture = (n) => ({ schema_version: 1, request_id: `00000000-0000-4000-8000-00000000000${n}`, mode: 'capture', operator_message: 'Remember this', target: null });
     const create = (cookie, csrf, n) => call({
@@ -429,13 +430,21 @@ test('serve sessions: intents routes accept an owner passkey session with a sess
     const intent = (await call({ port: ctx.port, pathname: `/api/cockpit/v1/intents/${created.json.intent_id}`, cookie: ownerA.cookie })).json;
     assert.equal(intent.intent_id, created.json.intent_id);
     assert.equal((await create(ownerA.cookie, csrfB, 2)).json.error.code, 'csrf_invalid', 'another session\'s CSRF token is refused');
-    assert.equal((await create(ownerA.cookie, csrfToken, 2)).json.error.code, 'csrf_invalid');
+    assert.equal((await create(ownerA.cookie, csrfRecovery, 2)).json.error.code, 'csrf_invalid');
     assert.equal((await create(ownerB.cookie, csrfB, 2)).status, 201);
-    // The server token keeps working on every intents route.
-    assert.equal((await create(`cockpit_serve=${ctx.token}`, csrfToken, 3)).status, 201);
+    // A recovery session acts as the owner on the intents API.
+    assert.equal((await create(recovery.cookie, csrfRecovery, 3)).status, 201);
     const listed = await call({ port: ctx.port, pathname: '/api/cockpit/v1/intents', cookie: ownerA.cookie });
     assert.equal(listed.status, 200);
     assert.equal(listed.json.items.length, 3);
+    const state = new IntentStore({ root: layout.root, env: layout.env }).read();
+    assert.ok(state.intents.every((item) => item.provenance.principal_id === ownerId));
+
+    // With --passkeys the server token authenticates nothing.
+    const tokenCookie = `cockpit_serve=${ctx.token}`;
+    const tokenCaps = await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: tokenCookie });
+    assert.equal(tokenCaps.status, 401);
+    assert.equal((await create(tokenCookie, csrfA, 4)).status, 401);
 
     // Member sessions are refused on every intents route.
     const memberSession = await signIn(ctx, memberKey, member.id);
@@ -453,13 +462,13 @@ test('serve sessions: intents routes accept an owner passkey session with a sess
   });
 });
 
-test('serve sessions: a member session wins over the server-token cookie on intents routes', async () => {
+test('serve sessions: a member session plus the server-token cookie is still a member on intents routes', async () => {
   const layout = makeServeRoot();
   await withServe(serveConfig(layout, ['--write']), async (ctx) => {
     const { member, memberKey } = await setup(ctx, layout);
     const tokenCookie = `cockpit_serve=${ctx.token}`;
-    const tokenCsrf = (await call({ port: ctx.port, pathname: '/api/cockpit/v1/capabilities', cookie: tokenCookie })).json.csrf_token;
     const memberSession = await signIn(ctx, memberKey, member.id);
+    const memberCsrf = (await account(ctx, memberSession.cookie)).json.csrf_token;
     const both = `${memberSession.cookie}; ${tokenCookie}`;
     for (const pathname of ['/api/cockpit/v1/capabilities', '/api/cockpit/v1/intents']) {
       const res = await call({ port: ctx.port, pathname, cookie: both });
@@ -468,7 +477,7 @@ test('serve sessions: a member session wins over the server-token cookie on inte
     }
     const created = await call({
       port: ctx.port, method: 'POST', pathname: '/api/cockpit/v1/intents', cookie: both, origin: ctx.origin,
-      body: { schema_version: 1, request_id: '00000000-0000-4000-8000-0000000000bb', mode: 'capture', operator_message: 'Note', target: null }, headers: { 'X-Cockpit-CSRF': tokenCsrf },
+      body: { schema_version: 1, request_id: '00000000-0000-4000-8000-0000000000bb', mode: 'capture', operator_message: 'Note', target: null }, headers: { 'X-Cockpit-CSRF': memberCsrf },
     });
     assert.equal(created.status, 403, created.text);
     assert.equal(created.json.error.code, 'forbidden');

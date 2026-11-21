@@ -13,12 +13,13 @@ import { IntentStore } from '../lib/intents/store.mjs';
 import { loadWebhookHeaders } from '../lib/intents/webhook-headers.mjs';
 import { openIdentityStore } from '../lib/identity/store.mjs';
 import { createPasskeyCeremonies } from '../lib/identity/passkeys.mjs';
-import { HttpError, createPasskeyApi } from '../lib/identity/passkey-http.mjs';
+import { HttpError, RECOVERY_SESSION_MAX_MS, createPasskeyApi } from '../lib/identity/passkey-http.mjs';
 import { SessionStoreError, openSessionStore } from '../lib/identity/sessions.mjs';
 import { openInviteStore } from '../lib/identity/invites.mjs';
+import { openAuditLog, openRecoveryStore } from '../lib/identity/recovery.mjs';
 import {
-  HOST_SESSION_COOKIE, INVITE_PATH, SESSION_COOKIE, createAccountApi, createSessionAuth, deviceLabel, expiredCookie, parseCookies, sessionCookie,
-  sessionCookieName,
+  DEFAULT_STEP_UP_WINDOW_MS, HOST_SESSION_COOKIE, INVITE_PATH, SESSION_COOKIE, createAccountApi, createSessionAuth, deviceLabel, expiredCookie, parseCookies,
+  requireFreshStepUp, sessionCookie, sessionCookieName,
 } from '../lib/identity/session-http.mjs';
 
 const tokenCookieName = 'cockpit_serve';
@@ -94,6 +95,18 @@ Options:
                       How long a member invite link stays valid, such as
                       24h, 3d, or 30m (default: 24h, at most 7d; requires
                       --passkeys)
+  --step-up-window <duration>
+                      How recently a session must confirm with a passkey
+                      before adding a passkey or creating an invite, such as
+                      5m or 15m (default: 5m, from 1m to 60m; requires
+                      --passkeys)
+  --rotate-token      Replace the owner's recovery token, end every recovery
+                      session, print the new token once, and exit (requires
+                      --passkeys; does not serve)
+  --recovery-enroll   For this run only, let a recovery-token session add one
+                      owner passkey without a passkey step-up, for 15 minutes
+                      or until used (when every owner passkey is lost;
+                      requires --passkeys)
   --help              Show this help
 `;
 }
@@ -281,43 +294,133 @@ const storeUnavailable = (error) => (error instanceof SessionStoreError && error
   ? new HttpError(503, 'store_busy', 'The sessions store is busy; retry shortly.', { 'Retry-After': '2' })
   : new HttpError(503, 'identity_unavailable', 'The sessions store is unavailable.', { 'Retry-After': '5' }));
 
-// Passkey sign-in, invites, per-device sessions, and the account API.
-function createIdentity(server, config, { token, csrfSecret, log, now }) {
+// The recovery token file and the audit log, next to the identity store.
+export function openRecoveryFiles(config, { now = Date.now } = {}) {
+  if (!config.recoveryStore || !config.auditStore) throw new ArgumentError('serve --passkeys needs an identity store');
+  return {
+    recovery: openRecoveryStore({ file: config.recoveryStore, root: config.root, now, lockWaitMs: PASSKEY_LOCK_WAIT_MS }),
+    audit: openAuditLog({ file: config.auditStore, root: config.root, now, lockWaitMs: PASSKEY_LOCK_WAIT_MS }),
+  };
+}
+
+const safeEqual = (a, b) => timingSafeEqual(String(a ?? ''), String(b ?? ''));
+
+// --recovery-enroll: for one run, a recovery session may add one owner
+// passkey without a step-up (every owner passkey is lost, so a step-up is
+// impossible). It closes after the first success or after 15 minutes.
+const RECOVERY_ENROLL_MS = 15 * 60 * 1000;
+
+// Passkey sign-in, recovery, step-up, invites, per-device sessions, and the
+// account API.
+function createIdentity(server, config, { csrfSecret, log, now }) {
   if (!config.auth) throw new ArgumentError('serve --passkeys requires authentication');
   if (!config.identityStore || !config.sessionStore || !config.inviteStore) throw new ArgumentError('serve --passkeys needs an identity store');
   const store = openIdentityStore({ file: config.identityStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS });
   const sessions = openSessionStore({
-    file: config.sessionStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS, ...(config.sessionLifetimeMs ? { lifetimeMs: config.sessionLifetimeMs } : {}),
+    file: config.sessionStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS, now, ...(config.sessionLifetimeMs ? { lifetimeMs: config.sessionLifetimeMs } : {}),
   });
   const invites = openInviteStore({
     file: config.inviteStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS, now, ...(config.inviteLifetimeMs ? { lifetimeMs: config.inviteLifetimeMs } : {}),
   });
+  const { recovery, audit } = openRecoveryFiles(config, { now });
+  const stepUpWindowMs = config.stepUpWindowMs ?? DEFAULT_STEP_UP_WINDOW_MS;
   const origins = () => passkeyOrigins(server, config);
   // __Host-cockpit_session when every passkey origin is https. Only that
   // name is read, so a plain-named cookie planted over http is ignored.
   const cookieName = sessionCookieName(origins());
-  const sessionAuth = createSessionAuth({ sessions, identityStore: store, cookieName, log });
+  // A recovery session older than the current recovery token is refused, so
+  // a rotation ends recovery sessions even if revoking them failed; with no
+  // token file, every recovery session is refused.
+  const sessionAuth = createSessionAuth({
+    sessions, identityStore: store, cookieName, recoveryNotBefore: () => recovery.createdAt() ?? Infinity, log,
+  });
   const ceremonies = createPasskeyCeremonies({ store, rpId: config.rpId, origins, invites });
+  const csrfToken = (principal, sessionId) => csrfTokenFor(csrfSecret, principal, sessionId);
+  const enroll = { open: config.recoveryEnroll === true, until: now() + RECOVERY_ENROLL_MS };
+  const enrollOpen = (signedIn) => enroll.open && now() < enroll.until && signedIn.session.kind === 'recovery';
+
+  // A live session wins: a member session is refused even with a recovery
+  // token in the body or a leftover server-token cookie. null = no session.
+  const ownerSession = (req) => {
+    const signedIn = sessionAuth.fromRequest(req);
+    if (!signedIn) return null;
+    if (signedIn.user.role !== 'owner') throw new HttpError(403, 'forbidden', 'Only the owner can do this.');
+    if (!safeEqual(req.headers['x-cockpit-csrf'], csrfToken(signedIn.user.id, signedIn.session.id))) {
+      throw new HttpError(403, 'csrf_invalid', 'Missing or invalid CSRF token.');
+    }
+    return signedIn;
+  };
+  const sessionRef = ({ session, user }) => ({ userId: user.id, sessionId: session.id });
+
+  const setSession = (created, origin) => ({
+    'Set-Cookie': sessionCookie(created.token, { maxAgeSeconds: created.maxAgeSeconds, secure: origin.startsWith('https:'), name: cookieName }),
+  });
+  const createSession = (input) => {
+    try {
+      return sessions.create(input);
+    } catch (error) {
+      log(`session create failed (${error?.code ?? error?.name})`);
+      throw storeUnavailable(error);
+    }
+  };
+
   const passkeys = createPasskeyApi({
     ceremonies,
     allowedOrigins: origins,
-    isOperator: (req) => requestHasAuth(req, token),
-    // Every passkey sign-in, owner or member, gets its own session, and so
-    // does a member who just enrolled through an invite.
-    onSignIn: (result, { origin, req }) => {
-      let created;
+    // Adding a passkey needs a live owner session, its CSRF token, and a
+    // fresh step-up (or, with --recovery-enroll, a recovery session while the
+    // window is open).
+    authorizeRegistration: (req) => {
+      const signedIn = ownerSession(req);
+      if (!signedIn) return null;
+      if (!enrollOpen(signedIn)) requireFreshStepUp(signedIn, { now: now(), windowMs: stepUpWindowMs });
+      return sessionRef(signedIn);
+    },
+    onRegistered: (result, ref) => {
+      if (!enroll.open || now() >= enroll.until) return;
+      const session = sessions.get(ref.sessionId);
+      if (session?.kind !== 'recovery') return;
+      enroll.open = false;
       try {
-        created = sessions.create({
-          userId: result.userId,
-          credentialId: result.credentialId,
-          label: deviceLabel({ credentialLabel: result.credentialLabel, userAgent: req.headers['user-agent'] }),
-        });
+        audit.record('recovery_enroll', 'ok');
       } catch (error) {
-        log(`session create failed (${error?.code ?? error?.name})`);
+        log(`audit write failed (${error?.code ?? error?.name})`);
+      }
+      log('recovery enrollment used; it is now closed');
+    },
+    authorizeStepUp: (req) => {
+      const signedIn = ownerSession(req);
+      if (!signedIn) throw new HttpError(401, 'session_required', 'Sign in first.');
+      return sessionRef(signedIn);
+    },
+    onStepUp: ({ sessionId }) => {
+      let updated;
+      try {
+        updated = sessions.markStepUp(sessionId);
+      } catch (error) {
+        log(`step-up record failed (${error?.code ?? error?.name})`);
         throw storeUnavailable(error);
       }
-      return { 'Set-Cookie': sessionCookie(created.token, { maxAgeSeconds: created.maxAgeSeconds, secure: origin.startsWith('https:'), name: cookieName }) };
+      if (!updated) throw new HttpError(401, 'session_required', 'Sign in first.');
+      return updated.step_up_at;
     },
+    recovery: {
+      check: (token) => recovery.check(token),
+      owner: () => sessionAuth.identity()?.users.find((user) => user.role === 'owner') ?? null,
+      record: (event, result) => audit.record(event, result),
+    },
+    // The recovery token signs in only the owner, with a recovery session
+    // that has no passkey and no step-up, for at most 12 hours.
+    onRecoverySignIn: ({ userId }, { origin }) => setSession(createSession({
+      userId, kind: 'recovery', label: 'Recovery (server token)', maxLifetimeMs: RECOVERY_SESSION_MAX_MS,
+    }), origin),
+    // Every passkey sign-in, owner or member, gets its own session, and so
+    // does a member who just enrolled through an invite.
+    onSignIn: (result, { origin, req }) => setSession(createSession({
+      userId: result.userId,
+      credentialId: result.credentialId,
+      label: deviceLabel({ credentialLabel: result.credentialLabel, userAgent: req.headers['user-agent'] }),
+    }), origin),
     log,
   });
   const account = createAccountApi({
@@ -325,12 +428,15 @@ function createIdentity(server, config, { token, csrfSecret, log, now }) {
     sessions,
     identityStore: store,
     allowedOrigins: origins,
-    csrfToken: (principal, sessionId) => csrfTokenFor(csrfSecret, principal, sessionId),
+    csrfToken,
     // Sign-out expires both session cookie names and any old server-token cookie.
     signOutCookies: (secure) => [
       expiredCookie(SESSION_COOKIE, { secure }), ...(secure ? [expiredCookie(HOST_SESSION_COOKIE, { secure })] : []), expiredCookie(tokenCookieName, { secure }),
     ],
     invites,
+    audit,
+    stepUpWindowMs,
+    now,
     log,
   });
   return { passkeys, account, sessionAuth };
@@ -338,20 +444,30 @@ function createIdentity(server, config, { token, csrfSecret, log, now }) {
 
 const logToStderr = (message) => process.stderr.write(`${message}\n`);
 
-// `now` is the clock for invite expiry (tests).
+// `now` is the clock for sessions, invite expiry, the step-up window, the
+// recovery enrollment window, and the audit log (tests).
+//
+// With --passkeys the per-start token no longer authenticates anything: the
+// ?token= URL and the cockpit_serve cookie are ignored, so the token never
+// travels in a URL or stands as a cookie. The owner's recovery token
+// (recovery.json, docs/recovery.md) signs in through the login page instead.
 export function createServeServer(config, {
   token = crypto.randomBytes(32).toString('hex'), env = process.env, log = logToStderr, now = Date.now,
 } = {}) {
   let api = null;
   let identity = null;
   // One CSRF secret for the intents and account APIs, so a session has one
-  // CSRF token for both.
-  const csrfSecret = crypto.createHmac('sha256', token).update('cockpit-intents-csrf').digest();
-  // A live passkey session wins; otherwise the server-token cookie.
+  // CSRF token for both. With --passkeys it is random per start; without, it
+  // is derived from the server token as before.
+  const csrfSecret = config.passkeys
+    ? crypto.randomBytes(32)
+    : crypto.createHmac('sha256', token).update('cockpit-intents-csrf').digest();
+  const tokenAuth = config.auth && !config.passkeys;
+  // A live passkey or recovery session; without --passkeys, the server-token cookie.
   const authFor = (req) => {
     const signedIn = identity?.sessionAuth.fromRequest(req);
     if (signedIn) return { kind: 'session', ...signedIn };
-    return requestHasAuth(req, token) ? { kind: 'token' } : null;
+    return tokenAuth && requestHasAuth(req, token) ? { kind: 'token' } : null;
   };
   const server = http.createServer((req, res) => {
     const port = boundPort(server, config);
@@ -361,7 +477,7 @@ export function createServeServer(config, {
     if (identity && (identity.passkeys.handle(req, res) || identity.account.handle(req, res))) return undefined;
 
     if (config.auth) {
-      const urlToken = requestToken(req);
+      const urlToken = tokenAuth ? requestToken(req) : null;
       if (urlToken && timingSafeEqual(urlToken, token)) {
         // Set the cookie and redirect to the token-free URL so the secret
         // does not linger in the address bar, history, or same-origin Referer.
@@ -395,9 +511,10 @@ export function createServeServer(config, {
     if (req.method === 'HEAD') res.end();
     else stream.pipe(res);
   });
-  if (config.passkeys) identity = createIdentity(server, config, { token, csrfSecret, log, now });
+  if (config.passkeys) identity = createIdentity(server, config, { csrfSecret, log, now });
   if (config.write) api = createWriteApi(server, config, { authFor, csrfSecret }, env);
-  server.cockpitToken = token;
+  // With --passkeys the per-start token authenticates nothing, so it is not exposed or printed.
+  server.cockpitToken = config.passkeys ? null : token;
   return server;
 }
 
@@ -408,6 +525,48 @@ export function servedUrl(config, token = undefined) {
   return url.href;
 }
 
+const RECOVERY_TOKEN_NOTICE = 'Store it offline (a password manager or paper), never in the repo, shell history, or chat. It is not shown again.';
+
+/**
+ * Create the owner's recovery token on the first --passkeys start. The token
+ * is returned only when it was created here and `interactive` is true (a
+ * terminal), so it is never written to a service journal; otherwise no token
+ * is created and the operator runs --rotate-token in a terminal.
+ *
+ * @returns {{ status: 'exists' } | { status: 'created', token: string } | { status: 'missing' }}
+ */
+export function ensureRecoveryToken(config, { interactive, now = Date.now } = {}) {
+  const { recovery } = openRecoveryFiles(config, { now });
+  if (recovery.exists()) return { status: 'exists' };
+  if (!interactive) return { status: 'missing' };
+  const created = recovery.ensure();
+  return created.created ? { status: 'created', token: created.token } : { status: 'exists' };
+}
+
+/**
+ * --rotate-token: write a new recovery token hash under the lock, revoke every
+ * recovery session, and record token_rotated. Returns the new token for the
+ * caller to print once. A failed revoke is reported, not fatal: recovery
+ * sessions older than the new token are refused anyway.
+ */
+export function rotateRecoveryToken(config, { now = Date.now } = {}) {
+  const { recovery, audit } = openRecoveryFiles(config, { now });
+  const { token } = recovery.rotate();
+  const warnings = [];
+  let revoked = 0;
+  try {
+    revoked = openSessionStore({ file: config.sessionStore, root: config.root, now }).revokeKind('recovery').length;
+  } catch (error) {
+    warnings.push(`could not revoke recovery sessions (${error?.code ?? error?.name}); they are refused anyway because they predate the new token`);
+  }
+  try {
+    audit.record('token_rotated', 'ok');
+  } catch (error) {
+    warnings.push(`could not record the rotation in the audit log (${error?.code ?? error?.name})`);
+  }
+  return { token, revoked, warnings };
+}
+
 async function main() {
   assertNode20();
   const config = parseServeConfig({ argv: process.argv.slice(2), env: process.env, stderr: process.stderr });
@@ -415,6 +574,14 @@ async function main() {
     process.stdout.write(usage());
     return;
   }
+  if (config.rotateToken) {
+    const { token, revoked, warnings } = rotateRecoveryToken(config);
+    for (const warning of warnings) process.stderr.write(`Warning: ${warning}\n`);
+    process.stdout.write(`Recovery token rotated; ${revoked} recovery session(s) ended. The old token no longer works.\n`);
+    process.stdout.write(`New recovery token: ${token}\n${RECOVERY_TOKEN_NOTICE}\n`);
+    return;
+  }
+  const recoveryToken = config.passkeys ? ensureRecoveryToken(config, { interactive: Boolean(process.stdout.isTTY) }) : null;
   const server = createServeServer(config);
   server.on('error', (error) => {
     process.stderr.write(`serve.mjs failed to start: ${error.message}\n`);
@@ -432,8 +599,15 @@ async function main() {
     if (config.passkeys) {
       const [origin] = passkeyOrigins(server, boundConfig);
       process.stdout.write(`Passkeys: sign in at ${origin}${loginPath} (relying party ${config.rpId})\n`);
-      process.stdout.write(`Add a passkey: ${origin}${loginPath}?token=${server.cockpitToken}\n`);
       process.stdout.write(`Devices, invites, and sign out: ${origin}${settingsPath}\n`);
+      if (recoveryToken.status === 'created') {
+        process.stdout.write(`Recovery token (create the owner, or recover, at ${origin}${loginPath}): ${recoveryToken.token}\n${RECOVERY_TOKEN_NOTICE}\n`);
+      } else if (recoveryToken.status === 'missing') {
+        process.stdout.write('No recovery token yet. Run serve.mjs with --passkeys --rotate-token in a terminal to create one; it is needed to create the owner.\n');
+      }
+      if (config.recoveryEnroll) {
+        process.stderr.write('Warning: --recovery-enroll is on. For 15 minutes, or until it is used once, a recovery-token session can add an owner passkey without a passkey step-up.\n');
+      }
     }
   });
 }
