@@ -100,6 +100,17 @@ const checkText = (value, { at, min, max, code }) => {
   return value;
 };
 
+/**
+ * True when `value` follows the credential label rules (0 to 64 characters,
+ * no surrounding whitespace, no control, bidi, or invisible formatting
+ * characters). The sessions store uses the same rules for device labels.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export const isSafeLabel = (value) => typeof value === 'string' && value === value.trim()
+  && [...value].length <= MAX_LABEL && !CONTROL_RE.test(value) && !FORMAT_RE.test(value);
+
 const checkTimestamp = (value, at) => {
   if (typeof value !== 'string' || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
     fail(`${at} must be an ISO 8601 UTC timestamp like 2026-01-02T03:04:05.000Z`);
