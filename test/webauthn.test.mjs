@@ -525,6 +525,8 @@ test('normalizeRelyingParty accepts matching rp ids and origins only', () => {
     { rpId: 'example.com', origins: ['https://example.com/'] },
     { rpId: 'example.com', origins: [] },
     { rpId: 'localhost', origins: ['http://127.0.0.1:18765'] },
+    { rpId: 'com', origins: ['https://example.com'] },
+    { rpId: 'example', origins: ['https://example'] },
   ];
   for (const input of bad) assert.throws(() => normalizeRelyingParty(input), code('invalid_argument'), JSON.stringify(input));
 });

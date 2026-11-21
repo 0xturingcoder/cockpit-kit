@@ -30,7 +30,7 @@ All passkey settings come from the command line. None are read from `.cockpit/se
 | Flag | Meaning |
 | --- | --- |
 | `--passkeys` | Enable the login page at `/auth/login/` and the API at `/auth/passkey/*`. Requires auth (`--passkeys --no-auth` is refused) and an identity store. |
-| `--rp-id <domain>` | Relying-party id. Default `localhost`. A lowercase domain name: no scheme, port, path, trailing dot, or IP address. Requires `--passkeys`. |
+| `--rp-id <domain>` | Relying-party id. Default `localhost`. A lowercase domain name of at least two labels (or `localhost`): no scheme, port, path, trailing dot, IP address, or bare top-level domain such as `com`. Requires `--passkeys`. |
 | `--origin <origin>` | Exact browser origin, repeatable. Shared with `--write`. Without it, the only passkey origin is `http://localhost:<port>`. Each origin must use `https` (or `http` with the host `localhost`), and its host must be the rp id or a subdomain of it. |
 | `--identity-store <path>` | The users and credentials file. With `--passkeys` it must come from this flag or the default state directory; `identity_store` in `.cockpit/serve.toml` is refused. If no store path can be resolved (no `HOME` or `XDG_STATE_HOME`), `--passkeys` refuses to start. |
 

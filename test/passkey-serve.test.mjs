@@ -427,6 +427,7 @@ test('serve config: passkey options are validated at startup and come only from 
   assert.throws(() => parse(['--rp-id', 'example.com', ...store]), /--rp-id requires --passkeys/);
   assert.throws(() => parse(['--passkeys', '--rp-id', 'example.com', ...store]), /--rp-id/);
   assert.throws(() => parse(['--passkeys', '--rp-id', '127.0.0.1', '--origin', 'https://127.0.0.1', ...store]), /--rp-id/);
+  assert.throws(() => parse(['--passkeys', '--rp-id', 'com', '--origin', 'https://example.com', ...store]), /--rp-id/);
   assert.throws(() => parse(['--passkeys', '--rp-id', 'example.com', '--origin', 'https://evil.example', ...store]), /--rp-id/);
   assert.throws(() => parse(['--passkeys', '--origin', 'http://127.0.0.1:18765', ...store]), /--rp-id/);
   assert.equal(parse(['--passkeys', '--rp-id=example.com', '--origin', 'https://cockpit.example.com', ...store]).rpId, 'example.com');

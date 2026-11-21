@@ -67,7 +67,7 @@ function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
   try {
     normalizeRelyingParty({ rpId, origins: checkOrigins });
   } catch {
-    throw new ArgumentError(`--rp-id must be a lowercase domain name (not an IP address), and every passkey origin must be https://<rp-id or a subdomain>[:port], or http://localhost[:port] with --rp-id localhost${origins.length ? '' : '; pass --origin for a non-localhost --rp-id'}`);
+    throw new ArgumentError(`--rp-id must be a lowercase domain name with at least two labels, or localhost (not an IP address), and every passkey origin must be https://<rp-id or a subdomain>[:port], or http://localhost[:port] with --rp-id localhost${origins.length ? '' : '; pass --origin for a non-localhost --rp-id'}`);
   }
   return { passkeys: true, rpId };
 }

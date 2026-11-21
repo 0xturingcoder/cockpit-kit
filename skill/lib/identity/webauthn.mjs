@@ -103,8 +103,8 @@ const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 /**
  * Validate a relying-party id and its allowed origins.
  *
- * The rp id is a lowercase DNS name (no scheme, port, path, trailing dot, or
- * IP address). Each origin must be exactly scheme://host[:port], use https
+ * The rp id is a lowercase DNS name of at least two labels, or "localhost"
+ * (no scheme, port, path, trailing dot, or IP address). Each origin must be exactly scheme://host[:port], use https
  * (http only for the host "localhost"), and have a host equal to the rp id
  * or a subdomain of it.
  *
@@ -117,6 +117,7 @@ export const normalizeRelyingParty = ({ rpId, origins }) => {
   const labels = rpId.split('.');
   if (!labels.every((label) => LABEL_RE.test(label))) bad();
   if (/^[0-9]+$/.test(labels[labels.length - 1])) bad(); // IPv4-looking
+  if (labels.length < 2 && rpId !== 'localhost') bad(); // a bare TLD such as "com"
   if (!Array.isArray(origins) || origins.length === 0) bad();
   const normalized = origins.map((origin) => {
     let url;
