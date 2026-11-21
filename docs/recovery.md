@@ -24,6 +24,8 @@ The recovery token is as strong as an owner passkey for signing in, so treat it 
 - **Never** put it in the knowledge repo, a dotfile, shell history, a chat, an issue, a ticket, or an agent's context. Do not pass it on a command line (`--token=...` does not exist for this reason); paste it into the login page's password field.
 - Rotate it (below) whenever it may have been seen by someone else, after using it on an untrusted device, and when someone with access to it leaves.
 
+What someone holding the token can do **without any passkey**: sign in as the owner with a recovery session, read pages and the account views (and use the intents API with `--write`), **revoke every session**, including the owner's own passkey sessions, and **remove every owner passkey but the last**. They **cannot** add a passkey or create an invite, because both need a passkey step-up. So losing the token means disruption, not takeover: [rotate it](#rotation) right away, which also ends every recovery session. If that leaves the owner without a passkey at hand (every other one removed, and the last one on a device that is away or lost), host shell access with [`--recovery-enroll`](#lost-every-passkey) gets the owner back in.
+
 The server prints the token only when it creates one, so it does not sit in your terminal scrollback after a restart. `serve.mjs` refuses to create one on a non-interactive start (see [First start](#first-start)), and `--rotate-token` refuses to run when stdout is not a terminal (see [Rotation](#rotation)), so it never lands in a service journal or log file.
 
 ## First start
