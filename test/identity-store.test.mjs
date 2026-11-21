@@ -67,7 +67,7 @@ function validDoc() {
 }
 
 function writeDoc(file, doc, mode = 0o600) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, typeof doc === 'string' ? doc : JSON.stringify(doc), { mode });
   fs.chmodSync(file, mode);
 }
@@ -317,6 +317,26 @@ test('load refuses group/world-accessible files and symlinks', posixOnly, () => 
   assertRejects(() => openIdentityStore({ file: link, root }).load(), 'unsafe_file');
 });
 
+test('a symlinked or group/world-writable store directory is refused', posixOnly, () => {
+  const { base, file, root, store } = seeded();
+  const dir = path.dirname(file);
+  fs.chmodSync(dir, 0o770);
+  assertRejects(() => store.load(), 'unsafe_permissions');
+  assertRejects(() => store.createUser({ displayName: 'Test Member Two' }), 'unsafe_permissions');
+  fs.chmodSync(dir, 0o702);
+  assertRejects(() => store.load(), 'unsafe_permissions');
+  fs.chmodSync(dir, 0o750);
+  assert.equal(store.load().users.length, 2, 'group read and search are fine');
+  fs.chmodSync(dir, 0o700);
+
+  const linkedDir = path.join(base, 'linked-state');
+  fs.symlinkSync(dir, linkedDir, 'dir');
+  const linked = openIdentityStore({ file: path.join(linkedDir, 'identity.json'), root });
+  assertRejects(() => linked.load(), 'unsafe_path');
+  assertRejects(() => linked.createUser({ displayName: 'Test Member Two' }), 'unsafe_path');
+  assert.equal(store.load().users.length, 2);
+});
+
 test('load checks and reads the file it opened, not whatever is at the path later', posixOnly, (t) => {
   const { base, file, root } = makeLayout();
   const store = openIdentityStore({ file, root });
@@ -350,7 +370,7 @@ test('load bounds the bytes it reads, even if fstat reports a small size', (t) =
 test('load maps open failures to unsafe_file or unreadable without leaking paths', posixOnly, () => {
   const { file, root } = makeLayout();
   const store = openIdentityStore({ file, root });
-  fs.mkdirSync(file, { recursive: true });
+  fs.mkdirSync(file, { recursive: true, mode: 0o700 });
   assertRejects(() => store.load(), 'unsafe_file', [file]);
   fs.rmdirSync(file);
 

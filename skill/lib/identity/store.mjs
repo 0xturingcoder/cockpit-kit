@@ -458,9 +458,24 @@ const writeStoreFile = (file, text, beforeRename = () => {}) => {
   fsyncDir(dir);
 };
 
+// Anyone who can write to the store's directory can rename a file over the
+// store, so the directory itself must not be a symlink or writable by group
+// or others. A missing directory is left to the caller.
+const checkDir = (dir) => {
+  let stat;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    fail('Identity store directory is unreadable', 'unreadable');
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) fail('Identity store directory must be a directory, not a symlink', 'unsafe_path');
+  if (CHECK_MODE && (stat.mode & 0o022) !== 0) fail('Identity store directory must not be writable by group or others (chmod 700)', 'unsafe_permissions');
+};
+
 const ensureDir = (dir) => {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (!fs.statSync(dir).isDirectory()) fail('Identity store directory is not a directory', 'unsafe_path');
+  checkDir(dir);
 };
 
 // The write lock is a file, <store>.lock, holding a random token that names
@@ -626,6 +641,7 @@ export const openIdentityStore = ({
     file: storeFile,
     load: () => {
       assertOutsideRoot(storeFile, root);
+      checkDir(path.dirname(storeFile));
       return clone(readStoreFile(storeFile));
     },
     createUser: ({ id, displayName, role = 'member' } = {}) => mutate(

@@ -16,7 +16,7 @@ Configured paths must be absolute or start with `~/`. `parseServeConfig()` retur
 
 ## File safety
 
-- **Owner-only:** a new store directory is created with mode `0700` (an existing directory is left alone). The file is always written with mode `0600`.
+- **Owner-only:** a new store directory is created with mode `0700`. An existing directory is not changed, but it is refused (`unsafe_path`) if it is a symlink, and refused (`unsafe_permissions`) if group or others can write to it, since anyone who can write to the directory can rename a file over the store. The file is always written with mode `0600`.
 - **Atomic writes:** each change goes to an exclusive temp file in the same directory (`0600`). The temp file is fsynced and renamed over the store, then the directory is fsynced where the platform allows it. Readers see the old file or the new one, never a partial one. If any step fails, the temp file is removed and the old file stays as it was.
 - **One writer at a time:** each change takes a lock file (`<file>.lock`), re-reads the file, applies the change, validates the result, and writes it. Concurrent writers (for example the server and a CLI) do not lose each other's updates. The lock holds a random token naming its owner, and it is hard-linked into place, so it exists either fully written or not at all.
   - Release and stale takeover both rename the lock to a unique name first, so only one process can claim a given lock. The lock is deleted only if its token is the expected one. If a process moved a lock that someone had just re-taken, it links that lock straight back. A writer never deletes a lock it does not own.
@@ -132,7 +132,7 @@ Failures throw `IdentityStoreError` with a stable `code`:
 | `not_found` | No user or credential with that id. |
 | `user_disabled` | Adding a credential to, or updating a counter for, a disabled user. |
 | `counter_regression` | The signature counter did not increase. |
-| `unsafe_path` / `unsafe_file` / `unsafe_permissions` | The path is inside the root, the file is a symlink or not a regular file, or the file has the wrong owner or mode. |
+| `unsafe_path` / `unsafe_file` / `unsafe_permissions` | The path is inside the root or its directory is a symlink; the file is a symlink or not a regular file; or the file has the wrong owner or mode, or its directory is writable by group or others. |
 | `store_busy` | Another writer held the lock for longer than `lockWaitMs` (5 seconds by default). |
 | `invalid_argument` | A bad argument to an API call. |
 | `unreadable` | The file exists but could not be opened or read (for example, permission denied). |
