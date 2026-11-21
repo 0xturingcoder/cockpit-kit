@@ -6,6 +6,7 @@ import { normalizeOrigin, normalizeOrigins } from './intents/origins.mjs';
 import { stateDirFor } from './intents/store.mjs';
 import { IDENTITY_STORE_FILE, IdentityStoreError, assertOutsideRoot } from './identity/store.mjs';
 import { expandHome } from './paths.mjs';
+import { normalizeRelyingParty } from './identity/webauthn.mjs';
 
 export const DEFAULT_SERVE_HOST = '127.0.0.1';
 export const DEFAULT_SERVE_PORT = 18765;
@@ -45,6 +46,32 @@ function parsePort(value, source) {
   return port;
 }
 
+export const DEFAULT_RP_ID = 'localhost';
+
+// Passkey settings come only from the command line. The relying-party id and
+// origins are checked here so a mismatch fails at startup; without --origin
+// the server's own http://localhost:<port> origin is used (port 0 binds later,
+// so the check uses the bare localhost origin).
+function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
+  if (!flags.passkeys) {
+    if (flags.rpId !== undefined) throw new ArgumentError('--rp-id requires --passkeys');
+    return { passkeys: false, rpId: null };
+  }
+  if (!auth) throw new ArgumentError('serve --passkeys requires authentication; --passkeys --no-auth is not supported');
+  if (!identityStore) throw new ArgumentError('serve --passkeys needs an identity store: pass --identity-store <path> or set HOME or XDG_STATE_HOME');
+  if (flags.identityStore === undefined && flags.fileIdentityStore) {
+    throw new ArgumentError('serve --passkeys does not accept identity_store from .cockpit/serve.toml, because anyone who can write the repo could point sign-in at their own store; pass --identity-store instead');
+  }
+  const rpId = flags.rpId ?? DEFAULT_RP_ID;
+  const checkOrigins = origins.length ? origins : [port ? `http://localhost:${port}` : 'http://localhost'];
+  try {
+    normalizeRelyingParty({ rpId, origins: checkOrigins });
+  } catch {
+    throw new ArgumentError(`--rp-id must be a lowercase domain name (not an IP address), and every passkey origin must be https://<rp-id or a subdomain>[:port], or http://localhost[:port] with --rp-id localhost${origins.length ? '' : '; pass --origin for a non-localhost --rp-id'}`);
+  }
+  return { passkeys: true, rpId };
+}
+
 export function parseOrigin(value, source = '--origin') {
   return normalizeOrigin(value, source);
 }
@@ -67,6 +94,11 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg.startsWith('--port=')) flags.port = parsePort(arg.slice('--port='.length), '--port');
     else if (arg === '--write') flags.write = true;
+    else if (arg === '--passkeys') flags.passkeys = true;
+    else if (arg === '--rp-id') {
+      flags.rpId = takeValue(argv, index, arg);
+      index += 1;
+    } else if (arg.startsWith('--rp-id=')) flags.rpId = arg.slice('--rp-id='.length);
     else if (arg === '--origin') {
       flags.origins = [...(flags.origins ?? []), parseOrigin(takeValue(argv, index, arg), '--origin')];
       index += 1;
@@ -173,14 +205,18 @@ export function parseServeConfig({ argv = [], env, stderr } = {}) {
   const identityStoreSource = flags.identityStore !== undefined ? '--identity-store' : '.cockpit/serve.toml identity_store';
   const identityStore = resolveIdentityStorePath(flags.identityStore ?? fileOptions.identityStore, { root, env, source: identityStoreSource });
   if (write && !auth) throw new ArgumentError('serve --write requires authentication; --write --no-auth is not supported');
+  const origins = normalizeOrigins(flags.origins ?? []);
+  const port = flags.port ?? fileOptions.port ?? DEFAULT_SERVE_PORT;
+  const passkeys = resolvePasskeys({ ...flags, fileIdentityStore: fileOptions.identityStore !== undefined }, { auth, identityStore, origins, port });
   return {
     root,
     write,
-    origins: normalizeOrigins(flags.origins ?? []),
+    ...passkeys,
+    origins,
     webhookUrl: flags.webhookUrl ?? env.COCKPIT_INTENTS_WEBHOOK_URL ?? null,
     webhookHeadersFile: flags.webhookHeadersFile ?? (env.COCKPIT_INTENTS_WEBHOOK_HEADERS_FILE || null),
     host: flags.host ?? fileOptions.host ?? DEFAULT_SERVE_HOST,
-    port: flags.port ?? fileOptions.port ?? DEFAULT_SERVE_PORT,
+    port,
     auth,
     identityStore,
     configPath: resolved.configPath,

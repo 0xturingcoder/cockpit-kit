@@ -10,9 +10,26 @@ import { assertNode20, expandHome, isPathInside } from '../lib/paths.mjs';
 import { createIntentsApi, validateWebhookUrl } from '../lib/intents/http.mjs';
 import { IntentStore } from '../lib/intents/store.mjs';
 import { loadWebhookHeaders } from '../lib/intents/webhook-headers.mjs';
+import { openIdentityStore } from '../lib/identity/store.mjs';
+import { createPasskeyCeremonies } from '../lib/identity/passkeys.mjs';
+import { HttpError, createPasskeyApi } from '../lib/identity/passkey-http.mjs';
 
 const cookieName = 'cockpit_serve';
 const allowedCockpitPath = '.cockpit/search-index.json';
+const loginPath = '/auth/login/';
+const loginDir = fileURLToPath(new URL('../templates/login/', import.meta.url));
+const loginAssets = new Map([
+  ['/auth/login/', 'index.html'],
+  ['/auth/login/cockpit-login.js', 'cockpit-login.js'],
+  ['/auth/login/cockpit-login.css', 'cockpit-login.css'],
+]);
+// The login page loads only its own same-origin script and stylesheet and
+// talks only to this server.
+const loginCsp = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+// Store writes on sign-in (the signature counter) wait at most this long for
+// the identity store lock, so a busy store cannot stall the server for the
+// store's default 5 seconds.
+const PASSKEY_LOCK_WAIT_MS = 1000;
 
 const contentTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -52,6 +69,10 @@ Options:
                       Users and passkeys file; must be outside the root
                       (default: per-repo state dir, or serve.toml
                       identity_store)
+  --passkeys          Enable passkey sign-in at /auth/login/ (requires auth;
+                      identity store from the command line or the default)
+  --rp-id <domain>    WebAuthn relying-party id (default: localhost); every
+                      --origin must be this host or a subdomain of it
   --help              Show this help
 `;
 }
@@ -152,6 +173,37 @@ function requestToken(req) {
   }
 }
 
+// Serve the kit's own login page (never a file from the knowledge repo).
+function serveLoginAsset(req, res, pathname) {
+  if (pathname === '/auth/login') {
+    res.writeHead(301, { Location: loginPath, 'Cache-Control': 'no-store' });
+    res.end();
+    return true;
+  }
+  const name = loginAssets.get(pathname);
+  if (!name) return false;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    responseText(res, 405, 'Method not allowed\n');
+    return true;
+  }
+  const body = fs.readFileSync(path.join(loginDir, name));
+  res.writeHead(200, {
+    'Content-Type': contentTypes.get(path.extname(name)),
+    'Content-Length': String(body.length),
+    'Content-Security-Policy': loginCsp,
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-store',
+  });
+  res.end(req.method === 'HEAD' ? undefined : body);
+  return true;
+}
+
+function sessionCookie(token, secure) {
+  return `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/${secure ? '; Secure' : ''}`;
+}
+
 function boundPort(server, config) {
   const address = server.address();
   return typeof address === 'object' && address ? address.port : config.port;
@@ -184,25 +236,56 @@ function createWriteApi(server, config, token, env) {
   });
 }
 
-export function createServeServer(config, { token = crypto.randomBytes(32).toString('hex'), env = process.env } = {}) {
+// The default passkey origin is this server's own http://localhost:<port>.
+// It is the only loopback origin that can use passkeys: browsers do not
+// accept an IP address such as 127.0.0.1 as a relying-party id.
+function passkeyOrigins(server, config) {
+  return config.origins?.length ? config.origins : [`http://localhost:${boundPort(server, config)}`];
+}
+
+function createPasskeys(server, config, token, log) {
+  if (!config.auth) throw new ArgumentError('serve --passkeys requires authentication');
+  if (!config.identityStore) throw new ArgumentError('serve --passkeys needs an identity store');
+  const store = openIdentityStore({ file: config.identityStore, root: config.root, lockWaitMs: PASSKEY_LOCK_WAIT_MS });
+  const ceremonies = createPasskeyCeremonies({ store, rpId: config.rpId, origins: () => passkeyOrigins(server, config) });
+  return createPasskeyApi({
+    ceremonies,
+    allowedOrigins: () => passkeyOrigins(server, config),
+    isOperator: (req) => requestHasAuth(req, token),
+    // The session cookie is the single owner-level server token, so only the
+    // owner's passkeys grant it. Members get per-device sessions in #9.
+    onSignIn: (result, { origin }) => {
+      if (result.role !== 'owner') throw new HttpError(403, 'session_unavailable', 'Passkey sign-in for members is not available yet.');
+      return { 'Set-Cookie': sessionCookie(token, origin.startsWith('https:')) };
+    },
+    log,
+  });
+}
+
+const logToStderr = (message) => process.stderr.write(`${message}\n`);
+
+export function createServeServer(config, { token = crypto.randomBytes(32).toString('hex'), env = process.env, log = logToStderr } = {}) {
   let api = null;
+  let passkeys = null;
   const server = http.createServer((req, res) => {
     const port = boundPort(server, config);
     const allowedHosts = hostHeaderValues(config.host, port);
     if (!allowedHosts.has(req.headers.host ?? '')) return responseText(res, 400, 'Bad Host header\n');
     if (api && api.handle(req, res)) return undefined;
+    if (passkeys && passkeys.handle(req, res)) return undefined;
 
     if (config.auth) {
       const urlToken = requestToken(req);
       if (urlToken && timingSafeEqual(urlToken, token)) {
         // Set the cookie and redirect to the token-free URL so the secret
         // does not linger in the address bar, history, or same-origin Referer.
-        res.setHeader('Set-Cookie', `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/`);
+        res.setHeader('Set-Cookie', sessionCookie(token, false));
         res.writeHead(302, { Location: String(req.url ?? '/').split('?')[0] || '/' });
         return res.end();
       }
+      if (passkeys && serveLoginAsset(req, res, decodedPathname(req.url))) return undefined;
       if (!requestHasAuth(req, token)) {
-        return responseText(res, 401, 'Authentication required\n');
+        return responseText(res, 401, passkeys ? `Authentication required\nSign in with a passkey at ${loginPath}\n` : 'Authentication required\n');
       }
     }
 
@@ -227,6 +310,7 @@ export function createServeServer(config, { token = crypto.randomBytes(32).toStr
     else stream.pipe(res);
   });
   if (config.write) api = createWriteApi(server, config, token, env);
+  if (config.passkeys) passkeys = createPasskeys(server, config, token, log);
   server.cockpitToken = token;
   return server;
 }
@@ -259,6 +343,11 @@ async function main() {
     process.stdout.write(`Cockpit root: ${config.root}\n`);
     process.stdout.write(`Serving: ${servedUrl(boundConfig, server.cockpitToken)}\n`);
     if (config.write) process.stdout.write('Write mode: operator intents API at /api/cockpit/v1 (state outside the root)\n');
+    if (config.passkeys) {
+      const [origin] = passkeyOrigins(server, boundConfig);
+      process.stdout.write(`Passkeys: sign in at ${origin}${loginPath} (relying party ${config.rpId})\n`);
+      process.stdout.write(`Add a passkey: ${origin}${loginPath}?token=${server.cockpitToken}\n`);
+    }
   });
 }
 
