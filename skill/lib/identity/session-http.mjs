@@ -1,15 +1,23 @@
 // Per-device session cookies, request authentication, and the account API
 // under /auth/account (list and revoke sessions, owner administration of
-// users' sessions and passkeys). Transport-free: serve.mjs supplies the
-// stores, the allowed origins, and the CSRF derivation. See docs/sessions.md.
+// users' sessions and passkeys, and invites). Transport-free: serve.mjs
+// supplies the stores, the allowed origins, and the CSRF derivation. See
+// docs/sessions.md and docs/invites.md.
 import crypto from 'node:crypto';
+import { INVITE_ID_RE, InviteStoreError } from './invites.mjs';
 import { HttpError, parseJson, readBody, sendJson } from './passkey-http.mjs';
 import { fileSignature } from './private-file.mjs';
 import { SessionStoreError } from './sessions.mjs';
-import { IdentityStoreError, findCredential, findUser } from './store.mjs';
+import { IdentityStoreError, findCredential, findUser, isSafeDisplayName } from './store.mjs';
 
 export const SESSION_COOKIE = 'cockpit_session';
 export const ACCOUNT_PREFIX = '/auth/account';
+// The invite page. The token goes in the URL fragment, which browsers never
+// send to a server or put in a Referer.
+export const INVITE_PATH = '/auth/invite/';
+
+/** The invite link for `token` on `origin`. */
+export const inviteUrl = (origin, token) => `${origin}${INVITE_PATH}#${token}`;
 
 const SESSION_ID_RE = /^ses_[A-Za-z0-9_-]{22}$/;
 const CREDENTIAL_ID_RE = /^[A-Za-z0-9_-]{1,1364}$/;
@@ -122,10 +130,13 @@ const STORE_ERRORS = Object.freeze({
   store_full: () => new HttpError(507, 'store_full', 'The sessions store is full.'),
   last_credential: () => new HttpError(409, 'last_passkey', "The owner's last passkey cannot be removed; add another passkey first."),
   not_found: () => new HttpError(404, 'passkey_not_found', 'No such passkey.'),
+  too_many_invites: () => new HttpError(409, 'too_many_invites', 'There are too many pending invites; revoke one first.'),
 });
 
+const isStoreError = (error) => error instanceof SessionStoreError || error instanceof IdentityStoreError || error instanceof InviteStoreError;
+
 const storeError = (error) => {
-  if ((error instanceof SessionStoreError || error instanceof IdentityStoreError) && STORE_ERRORS[error.code]) return STORE_ERRORS[error.code]();
+  if (isStoreError(error) && STORE_ERRORS[error.code]) return STORE_ERRORS[error.code]();
   return error;
 };
 
@@ -143,9 +154,10 @@ const safeEqual = (a, b) => {
  * @param {() => Iterable<string>} options.allowedOrigins Exact origins (config).
  * @param {(principal: string, sessionId: string) => string} options.csrfToken Per-session CSRF token.
  * @param {(secure: boolean) => string[]} options.signOutCookies Set-Cookie values that sign this browser out.
+ * @param {import('./invites.mjs').InviteStore} [options.invites] Invites store; without it the invite routes return 404.
  * @param {(message: string) => void} [options.log]
  */
-export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins, csrfToken, signOutCookies, log = () => {} }) => {
+export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins, csrfToken, signOutCookies, invites = null, log = () => {} }) => {
   const checkPost = (req) => {
     const origin = req.headers.origin;
     if (!origin || !new Set(allowedOrigins()).has(origin)) throw new HttpError(403, 'origin_denied', 'Origin not allowed.');
@@ -190,7 +202,40 @@ export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins
     }
   };
 
+  const inviteRoutes = invites ? {
+    '/invites': {
+      // Pending invites only. Tokens are never stored, and hashes never listed.
+      GET: (req) => {
+        checkGet(req);
+        requireOwner(requireSession(req));
+        try {
+          return { status: 200, body: { invites: invites.list() } };
+        } catch (error) {
+          throw storeError(error);
+        }
+      },
+      // The one response that carries an invite token, inside the link.
+      POST: (req) => mutation(req, ({ user, body, origin }) => {
+        requireOwner({ user });
+        if (!isSafeDisplayName(body.display_name)) {
+          throw new HttpError(400, 'invalid_request', 'display_name must be 1 to 128 characters without surrounding whitespace, control, or formatting characters.');
+        }
+        const { token, invite } = invites.create({ displayName: body.display_name, createdBy: user.id });
+        return { status: 201, body: { invite, url: inviteUrl(origin, token) } };
+      }),
+    },
+    '/invites/revoke': {
+      POST: (req) => mutation(req, ({ user, body }) => {
+        requireOwner({ user });
+        if (typeof body.invite_id !== 'string' || !INVITE_ID_RE.test(body.invite_id)) throw new HttpError(400, 'invalid_request', 'Expected invite_id.');
+        if (!invites.revoke(body.invite_id)) throw new HttpError(404, 'invite_not_found', 'No such pending invite.');
+        return { status: 200, body: { revoked: true } };
+      }),
+    },
+  } : {};
+
   const routes = {
+    ...inviteRoutes,
     '': {
       GET: (req) => {
         checkGet(req);
@@ -274,7 +319,7 @@ export const createAccountApi = ({ auth, sessions, identityStore, allowedOrigins
   const sendError = (res, error) => {
     if (error instanceof HttpError) return sendJson(res, error.status, { error: { code: error.code, message: error.message } }, error.extra);
     log(`account internal_error${error?.code ? ` (${error.code})` : ''}`);
-    if (error instanceof SessionStoreError || error instanceof IdentityStoreError) {
+    if (isStoreError(error)) {
       return sendJson(res, 503, { error: { code: 'identity_unavailable', message: 'The identity or sessions store is unavailable.' } }, { 'Retry-After': '5' });
     }
     return sendJson(res, 500, { error: { code: 'internal_error', message: 'Internal error.' } });
