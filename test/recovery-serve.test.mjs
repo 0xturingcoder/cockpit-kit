@@ -572,21 +572,30 @@ test('recovery: the token never appears in a response, a log line, or a stored f
 // ---------------------------------------------------------------------------
 // The CLI
 
-const runServe = (layout, args, { untilLine } = {}) => new Promise((resolve, reject) => {
+// A long-running start is stopped only once untilLine has matched stdout and
+// untilStderr (if given) has matched stderr: the two pipes are read
+// independently, so one can arrive before the other. 'close' (not 'exit')
+// waits for both pipes to drain. If a pattern never shows up, the child is
+// stopped after a few seconds so the caller's assertions report what it did print.
+const runServe = (layout, args, { untilLine, untilStderr } = {}) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [serveScript, '--passkeys', '--identity-store', layout.identityStore, '--port', '0', ...args], {
     env: layout.env, stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const giveUp = (untilLine || untilStderr) ? setTimeout(() => child.kill('SIGTERM'), 10_000) : null;
   let stdout = '';
   let stderr = '';
+  const stopWhenReady = () => {
+    if (!untilLine && !untilStderr) return;
+    if (untilLine && !untilLine.test(stdout)) return;
+    if (untilStderr && !untilStderr.test(stderr)) return;
+    child.kill('SIGTERM');
+  };
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => {
-    stdout += chunk;
-    if (untilLine && untilLine.test(stdout)) child.kill('SIGTERM');
-  });
-  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.stdout.on('data', (chunk) => { stdout += chunk; stopWhenReady(); });
+  child.stderr.on('data', (chunk) => { stderr += chunk; stopWhenReady(); });
   child.on('error', reject);
-  child.on('exit', (code) => resolve({ code, stdout, stderr }));
+  child.on('close', (code) => { clearTimeout(giveUp); resolve({ code, stdout, stderr }); });
 });
 
 test('recovery CLI: --rotate-token refuses a non-terminal stdout, prints no token, and leaves the stored token in place', async () => {
@@ -623,7 +632,7 @@ test('recovery CLI: a non-interactive start does not create or print a token; --
   assert.ok(!fs.readFileSync(statePath(layout, 'recovery.json'), 'utf8').includes(token));
   assert.deepEqual(readAudit(layout).events.map((e) => `${e.event}:${e.result}`), ['token_rotated:ok']);
 
-  const again = await runServe(layout, ['--recovery-enroll'], { untilLine: /Devices, invites, and sign out/ });
+  const again = await runServe(layout, ['--recovery-enroll'], { untilLine: /Devices, invites, and sign out/, untilStderr: /--recovery-enroll is on/ });
   assert.ok(!again.stdout.includes(token) && !again.stderr.includes(token), 'later starts never print it');
   assert.doesNotMatch(again.stdout, /No recovery token yet|Recovery token/);
   assert.match(again.stderr, /--recovery-enroll is on/);
