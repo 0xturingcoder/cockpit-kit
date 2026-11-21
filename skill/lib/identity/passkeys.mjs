@@ -154,7 +154,7 @@ export const createPasskeyCeremonies = ({
    * generic error so a response never shows whether a credential or user
    * exists.
    *
-   * @returns {Readonly<{ userId: string, role: 'owner' | 'member', credentialId: string, counter: number }>}
+   * @returns {Readonly<{ userId: string, role: 'owner' | 'member', credentialId: string, credentialLabel: string, counter: number }>}
    */
   const finishAuthentication = ({ challengeId, response } = {}) => {
     const { challenge } = challenges.consume(challengeId, 'authentication');
@@ -185,7 +185,9 @@ export const createPasskeyCeremonies = ({
     // sign-ins with the same counter cannot both succeed. 0 -> 0 (an
     // authenticator without a counter) needs no write.
     if (verified.counter !== 0 || hit.credential.counter !== 0) store.updateCounter(hit.credential.id, verified.counter);
-    return Object.freeze({ userId: hit.user.id, role: hit.user.role, credentialId: hit.credential.id, counter: verified.counter });
+    return Object.freeze({
+      userId: hit.user.id, role: hit.user.role, credentialId: hit.credential.id, credentialLabel: hit.credential.label, counter: verified.counter,
+    });
   };
 
   return Object.freeze({ startRegistration, finishRegistration, startAuthentication, finishAuthentication });

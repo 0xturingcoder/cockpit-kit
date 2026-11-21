@@ -40,13 +40,13 @@ export class HttpError extends Error {
   }
 }
 
-const sendJson = (res, status, body, extra = {}) => {
+export const sendJson = (res, status, body, extra = {}) => {
   const text = `${JSON.stringify(body)}\n`;
   res.writeHead(status, { ...privateHeaders, 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(text), ...extra });
   res.end(text);
 };
 
-const readBody = (req) => new Promise((resolve, reject) => {
+export const readBody = (req) => new Promise((resolve, reject) => {
   let size = 0;
   const chunks = [];
   const timer = setTimeout(() => {
@@ -74,7 +74,7 @@ const readBody = (req) => new Promise((resolve, reject) => {
   });
 });
 
-const parseJson = (buffer) => {
+export const parseJson = (buffer) => {
   let value;
   try {
     value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer));
@@ -168,8 +168,8 @@ const challengeIssueError = (error) => (error instanceof ChallengeError
  * @param {ReturnType<import('./passkeys.mjs').createPasskeyCeremonies>} options.ceremonies
  * @param {() => Iterable<string>} options.allowedOrigins Exact origins (config).
  * @param {(req) => boolean} options.isOperator True when the request carries operator auth (registration).
- * @param {(result, context: { origin: string }) => Record<string, string>} options.onSignIn
- *   Called after a verified sign-in with { userId, role, credentialId, counter }; returns
+ * @param {(result, context: { origin: string, req: import('node:http').IncomingMessage }) => Record<string, string>} options.onSignIn
+ *   Called after a verified sign-in with { userId, role, credentialId, credentialLabel, counter }; returns
  *   extra response headers (e.g. Set-Cookie) or throws HttpError to refuse.
  * @param {(message: string) => void} [options.log] Receives error codes, never request data.
  * @param {() => number} [options.now] Clock for rate limits (tests).
@@ -253,7 +253,7 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
       const origin = checkRequest(req);
       const fields = verifyFields(parseJson(await readBody(req)));
       const result = attempt(buckets.login.failures, () => ceremonies.finishAuthentication(fields), signInError);
-      const headers = onSignIn(result, { origin });
+      const headers = onSignIn(result, { origin, req });
       return { status: 200, body: { signed_in: true, user_id: result.userId }, headers };
     },
   };
