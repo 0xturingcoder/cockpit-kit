@@ -176,11 +176,12 @@ node ~/.local/share/cockpit-kit/skill/scripts/serve.mjs --root /path/to/knowledg
 - **First passkey:** open the printed "Add a passkey" URL (`http://localhost:<port>/auth/login/?token=...`), enter your name, and add a passkey. The first registration creates the owner in the identity store. Use `localhost`, not `127.0.0.1`, for passkeys.
 - **Sign in:** open `/auth/login/` and choose "Sign in with a passkey". Each sign-in, owner or member, gets its own server-side session (`cockpit_session` cookie: `HttpOnly`, `SameSite=Strict`, `Max-Age` equal to the lifetime, `Secure` on https). Only a hash of the session token is stored, in `sessions.json` next to the identity store.
 - **Devices:** `/auth/settings/` lists your signed-in devices and lets you revoke any of them or sign out. The owner can also revoke any user's sessions and remove their passkeys (except the owner's last one). Revoked and expired sessions are refused on the next request.
+- **Invites:** to let someone else sign in, the owner creates an invite under **Invites** on `/auth/settings/` and sends them the one-time link (`/auth/invite/#<token>`). They open it and create their own passkey, which makes them a member and signs them in. A link works once, expires after 24 hours (`--invite-lifetime`), and can be revoked while pending; only a hash of its token is stored, in `invites.json` next to the identity store, and the token stays in the URL fragment, so it never reaches server logs or referrers.
 - **Intents:** with `--write`, the owner's passkey session works on every `/api/cockpit/v1` route, with a CSRF token bound to that session; the server token still works too. Member sessions can read pages but not use the intents API yet.
-- **Config:** `--rp-id <domain>` (default `localhost`), `--origin <origin>` (repeatable; default `http://localhost:<port>`), and `--session-lifetime <duration>` (default `90d`), command line only. Each origin must be the rp id or a subdomain of it, over https except for `localhost`. `--passkeys` needs auth, and it refuses an `identity_store` set in `.cockpit/serve.toml`; use `--identity-store` or the default.
+- **Config:** `--rp-id <domain>` (default `localhost`), `--origin <origin>` (repeatable; default `http://localhost:<port>`), `--session-lifetime <duration>` (default `90d`), and `--invite-lifetime <duration>` (default `24h`, at most `7d`), command line only. Each origin must be the rp id or a subdomain of it, over https except for `localhost`. `--passkeys` needs auth, and it refuses an `identity_store` set in `.cockpit/serve.toml`; use `--identity-store` or the default.
 - **Safety:** the relying-party id and origins never come from request headers. Sign-in failures all return the same `401 sign_in_failed`, and failed attempts are rate limited. The login page has no inline script and is served with a strict Content-Security-Policy.
 
-Ceremonies, the supported subset, error codes, and the verifier API: [`docs/passkeys.md`](docs/passkeys.md). Sessions, the account API, and which routes accept a session: [`docs/sessions.md`](docs/sessions.md).
+Ceremonies, the supported subset, error codes, and the verifier API: [`docs/passkeys.md`](docs/passkeys.md). Sessions, the account API, and which routes accept a session: [`docs/sessions.md`](docs/sessions.md). Invite links, their lifecycle, and how the token stays out of logs: [`docs/invites.md`](docs/invites.md).
 
 ## Themes: Light, Dark, System
 
@@ -226,6 +227,7 @@ The GitHub Actions workflow runs `node --test` on Ubuntu and macOS with Node 20 
 - Users and credentials store (schema and API): [`docs/identity-store.md`](docs/identity-store.md)
 - Passkey sign-in (ceremonies, supported subset, config, errors, verifier API): [`docs/passkeys.md`](docs/passkeys.md)
 - Per-device sessions (lifetime, cookie, list and revoke, settings page, intents routes): [`docs/sessions.md`](docs/sessions.md)
+- Invites (one-time links to enroll a member's passkey, lifecycle, routes, errors): [`docs/invites.md`](docs/invites.md)
 - Design (lean MVP implemented, hardening deferred): [Operator comments and capture lifecycle](docs/design/operator-comments-and-capture.md) ([#10](https://github.com/autojeremy/cockpit-kit/issues/10)).
 
 ## Security
