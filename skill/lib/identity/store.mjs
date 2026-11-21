@@ -25,9 +25,9 @@
 // - Error messages name fields by position (users[0].credentials[1].id) and
 //   never include credential ids, public keys, or other stored values.
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { isPathInside } from '../paths.mjs';
+import { MAX_FILE_BYTES, createPrivateFile } from './private-file.mjs';
 
 export const IDENTITY_SCHEMA_VERSION = 1;
 export const IDENTITY_STORE_FILE = 'identity.json';
@@ -38,8 +38,9 @@ export const ROLES = Object.freeze(['owner', 'member']);
 // that fits: one credential at the field maxima takes about 4.5 KB (about 230
 // fit), a typical passkey about 0.4 KB (about 2,500 fit). A write that would
 // exceed the cap is refused with "store_full" and nothing is written, so the
-// store always stays loadable.
-export const MAX_FILE_BYTES = 1024 * 1024;
+// store always stays loadable. The cap and the file I/O are shared with the
+// sessions store (private-file.mjs).
+export { MAX_FILE_BYTES };
 const MAX_USERS = 1000;
 const MAX_CREDENTIALS_PER_USER = 32;
 // WebAuthn credential ids are at most 1023 bytes.
@@ -60,10 +61,6 @@ const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const FORMAT_RE = /[\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 const DEFAULT_LOCK_WAIT_MS = 5000;
 const DEFAULT_LOCK_STALE_MS = 30000;
-const CHECK_MODE = process.platform !== 'win32';
-// Open without following a final symlink, and without blocking on a FIFO,
-// where the platform has those flags.
-const READ_FLAGS = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
 
 const STORE_KEYS = ['schema_version', 'users'];
 const USER_KEYS = ['id', 'display_name', 'role', 'disabled', 'created_at', 'credentials'];
@@ -80,8 +77,6 @@ export class IdentityStoreError extends Error {
 const fail = (message, code) => { throw new IdentityStoreError(message, code); };
 
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-
-const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
 // ---------------------------------------------------------------------------
 // Field validation. Messages cite `at` (a field path), never the value.
@@ -366,237 +361,15 @@ export const assertOutsideRoot = (file, root, source = 'identity store') => {
   return file;
 };
 
-const NOT_REGULAR = 'Identity store must be a regular file, not a symlink';
+const identityFile = createPrivateFile({
+  label: 'Identity store',
+  fail,
+  isError: (error) => error instanceof IdentityStoreError,
+  missingMessage: 'Identity store does not exist yet; create the owner first',
+  fullHint: 'remove unused credentials first',
+});
 
-const openStoreFile = (file) => {
-  if (!fs.constants.O_NOFOLLOW) {
-    // No O_NOFOLLOW on this platform (Windows): refuse a symlink up front.
-    let stat;
-    try {
-      stat = fs.lstatSync(file);
-    } catch (error) {
-      if (error.code === 'ENOENT') fail('Identity store does not exist yet; create the owner first', 'missing');
-      fail('Identity store is unreadable', 'unreadable');
-    }
-    if (stat.isSymbolicLink()) fail(NOT_REGULAR, 'unsafe_file');
-  }
-  try {
-    return fs.openSync(file, READ_FLAGS);
-  } catch (error) {
-    if (error.code === 'ENOENT') fail('Identity store does not exist yet; create the owner first', 'missing');
-    // O_NOFOLLOW on a symlink fails with ELOOP (EMLINK on some BSDs).
-    if (error.code === 'ELOOP' || error.code === 'EMLINK') fail(NOT_REGULAR, 'unsafe_file');
-    // Node's own message includes the absolute path; do not pass it through.
-    return fail('Identity store is unreadable', 'unreadable');
-  }
-};
-
-const readAtMost = (fd, limit) => {
-  const buffer = Buffer.alloc(limit);
-  let length = 0;
-  while (length < limit) {
-    const count = fs.readSync(fd, buffer, length, limit - length, length);
-    if (count === 0) break;
-    length += count;
-  }
-  return buffer.subarray(0, length);
-};
-
-// Open once without following symlinks, check what was actually opened
-// (fstat), and read from that same descriptor, so the path cannot be
-// swapped between the checks and the read.
-const readStoreFile = (file) => {
-  const fd = openStoreFile(file);
-  let bytes;
-  try {
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile()) fail(NOT_REGULAR, 'unsafe_file');
-    if (CHECK_MODE && (stat.mode & 0o077) !== 0) fail('Identity store must not be accessible by group or others (chmod 600)', 'unsafe_permissions');
-    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) fail('Identity store must be owned by the service user', 'unsafe_permissions');
-    if (stat.size > MAX_FILE_BYTES) fail(`Identity store is larger than ${MAX_FILE_BYTES} bytes`);
-    bytes = readAtMost(fd, MAX_FILE_BYTES + 1);
-  } catch (error) {
-    if (error instanceof IdentityStoreError) throw error;
-    fail('Identity store is unreadable', 'unreadable');
-  } finally {
-    fs.closeSync(fd);
-  }
-  // The file may have grown after fstat; the bound applies to what was read.
-  if (bytes.length > MAX_FILE_BYTES) fail(`Identity store is larger than ${MAX_FILE_BYTES} bytes`);
-  let parsed;
-  try {
-    parsed = JSON.parse(bytes.toString('utf8'));
-  } catch {
-    // JSON.parse messages can quote file content; do not pass them through.
-    fail('Identity store is not valid JSON');
-  }
-  return validateIdentityData(parsed);
-};
-
-const fsyncDir = (dir) => {
-  if (process.platform === 'win32') return;
-  let fd;
-  try {
-    fd = fs.openSync(dir, 'r');
-    fs.fsyncSync(fd);
-  } catch {
-    // Best effort: some filesystems refuse fsync on directories.
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-};
-
-// Serialize before touching the disk, and refuse anything load() would refuse.
-const serialize = (data) => {
-  const text = `${JSON.stringify(data, null, 2)}\n`;
-  if (Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES) {
-    fail(`Identity store would exceed ${MAX_FILE_BYTES} bytes; remove unused credentials first`, 'store_full');
-  }
-  return text;
-};
-
-const writeStoreFile = (file, text, beforeRename = () => {}) => {
-  const dir = path.dirname(file);
-  const temp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
-  const fd = fs.openSync(temp, 'wx', 0o600);
-  try {
-    try {
-      fs.writeFileSync(fd, text, 'utf8');
-      fs.fchmodSync(fd, 0o600);
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    beforeRename();
-    fs.renameSync(temp, file);
-  } catch (error) {
-    fs.rmSync(temp, { force: true });
-    throw error;
-  }
-  fsyncDir(dir);
-};
-
-// Anyone who can write to the store's directory can rename a file over the
-// store, so the directory itself must not be a symlink or writable by group
-// or others. A missing directory is left to the caller.
-const checkDir = (dir) => {
-  let stat;
-  try {
-    stat = fs.lstatSync(dir);
-  } catch (error) {
-    if (error.code === 'ENOENT') return;
-    fail('Identity store directory is unreadable', 'unreadable');
-  }
-  if (stat.isSymbolicLink() || !stat.isDirectory()) fail('Identity store directory must be a directory, not a symlink', 'unsafe_path');
-  if (CHECK_MODE && (stat.mode & 0o022) !== 0) fail('Identity store directory must not be writable by group or others (chmod 700)', 'unsafe_permissions');
-};
-
-const ensureDir = (dir) => {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  checkDir(dir);
-};
-
-// The write lock is a file, <store>.lock, holding a random token that names
-// its owner. It is written to a temp file and hard-linked into place, which
-// fails with EEXIST while another writer holds it, so the lock never exists
-// half-written.
-
-// Returns { token, mtimeMs } for the lock at `lockFile`, or null if none.
-const readLock = (lockFile) => {
-  let fd;
-  try {
-    fd = fs.openSync(lockFile, READ_FLAGS);
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
-  try {
-    const stat = fs.fstatSync(fd);
-    const buffer = Buffer.alloc(64);
-    const length = stat.isFile() ? fs.readSync(fd, buffer, 0, buffer.length, 0) : 0;
-    return { token: buffer.toString('utf8', 0, length), mtimeMs: stat.mtimeMs };
-  } finally {
-    fs.closeSync(fd);
-  }
-};
-
-const createLock = (lockFile, token) => {
-  const temp = `${lockFile}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(temp, token, { flag: 'wx', mode: 0o600 });
-  try {
-    fs.linkSync(temp, lockFile);
-    return true;
-  } catch (error) {
-    if (error.code === 'EEXIST') return false;
-    throw error;
-  } finally {
-    fs.rmSync(temp, { force: true });
-  }
-};
-
-// Remove the lock only if it still carries `token`. Renaming it to a unique
-// name first means only one process can claim a given lock file. If what was
-// moved turns out to be someone else's lock (it was re-taken in between), it
-// is linked straight back.
-const removeLockIf = (lockFile, token) => {
-  const aside = `${lockFile}.${crypto.randomBytes(6).toString('hex')}.stale`;
-  try {
-    fs.renameSync(lockFile, aside);
-  } catch (error) {
-    if (error.code === 'ENOENT') return false;
-    throw error;
-  }
-  try {
-    if (readLock(aside)?.token === token) return true;
-    try {
-      fs.linkSync(aside, lockFile);
-    } catch {
-      // A newer lock is already in place; leave it alone.
-    }
-    return false;
-  } finally {
-    fs.rmSync(aside, { recursive: true, force: true });
-  }
-};
-
-// Run fn(isHeld) while holding the lock. isHeld() reports whether the lock
-// still carries this writer's token, so a writer whose lock was taken over
-// can stop before it writes.
-const withLock = (lockFile, { waitMs, staleMs }, fn) => {
-  const token = crypto.randomBytes(16).toString('hex');
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    let current;
-    try {
-      if (createLock(lockFile, token)) break;
-      current = readLock(lockFile);
-      if (!current) continue;
-      // A lock older than staleMs is presumed abandoned; locks are held only
-      // for one read-modify-write, which takes milliseconds.
-      if (Date.now() - current.mtimeMs > staleMs && removeLockIf(lockFile, current.token)) continue;
-    } catch {
-      fail('Cannot take the identity store lock', 'store_busy');
-    }
-    if (Date.now() > deadline) fail('Identity store is locked by another writer', 'store_busy');
-    sleep(25);
-  }
-  const isHeld = () => {
-    try {
-      return readLock(lockFile)?.token === token;
-    } catch {
-      return false;
-    }
-  };
-  try {
-    return fn(isHeld);
-  } finally {
-    try {
-      removeLockIf(lockFile, token);
-    } catch {
-      // Leave it; it becomes stale and is taken over later.
-    }
-  }
-};
+const readStoreFile = (file) => validateIdentityData(identityFile.read(file));
 
 const EMPTY = Object.freeze({ schema_version: IDENTITY_SCHEMA_VERSION, users: Object.freeze([]) });
 
@@ -636,8 +409,8 @@ export const openIdentityStore = ({
   // file starts from an empty document only for createUser (bootstrap).
   const mutate = (transform, { allowMissing = false } = {}) => {
     assertOutsideRoot(storeFile, root);
-    ensureDir(path.dirname(storeFile));
-    return withLock(lockFile, lockOptions, (isHeld) => {
+    identityFile.ensureDir(path.dirname(storeFile));
+    return identityFile.withLock(lockFile, lockOptions, (isHeld) => {
       let current;
       try {
         current = readStoreFile(storeFile);
@@ -647,7 +420,7 @@ export const openIdentityStore = ({
       }
       const { data, result, unchanged } = transform(current);
       if (!unchanged) {
-        writeStoreFile(storeFile, serialize(validateIdentityData(data)), () => {
+        identityFile.write(storeFile, identityFile.serialize(validateIdentityData(data)), () => {
           if (!isHeld()) fail('Another writer took over the identity store lock; nothing was written', 'store_busy');
         });
       }
@@ -659,7 +432,7 @@ export const openIdentityStore = ({
     file: storeFile,
     load: () => {
       assertOutsideRoot(storeFile, root);
-      checkDir(path.dirname(storeFile));
+      identityFile.checkDir(path.dirname(storeFile));
       return clone(readStoreFile(storeFile));
     },
     createUser: ({ id, displayName, role = 'member' } = {}) => mutate(
