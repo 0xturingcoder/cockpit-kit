@@ -8,6 +8,7 @@ import { IDENTITY_STORE_FILE, IdentityStoreError, assertOutsideRoot } from './id
 import { expandHome } from './paths.mjs';
 import { normalizeRelyingParty } from './identity/webauthn.mjs';
 import { DEFAULT_SESSION_LIFETIME_MS, MAX_SESSION_LIFETIME_MS, MIN_SESSION_LIFETIME_MS, SESSIONS_FILE } from './identity/sessions.mjs';
+import { DEFAULT_INVITE_LIFETIME_MS, INVITES_FILE, MAX_INVITE_LIFETIME_MS, MIN_INVITE_LIFETIME_MS } from './identity/invites.mjs';
 
 export const DEFAULT_SERVE_HOST = '127.0.0.1';
 export const DEFAULT_SERVE_PORT = 18765;
@@ -55,21 +56,31 @@ export const DEFAULT_RP_ID = 'localhost';
 // so the check uses the bare localhost origin).
 const DURATION_UNITS = Object.freeze({ m: 60 * 1000, h: 60 * 60 * 1000, d: 24 * 60 * 60 * 1000 });
 
-// A whole number of minutes, hours, or days, such as 90d, 12h, or 30m.
-export function parseSessionLifetime(value, source = '--session-lifetime') {
+// A whole number of minutes, hours, or days, such as 90d, 12h, or 30m,
+// between `min` and `max` (both given as milliseconds and as text).
+export function parseDuration(value, { source, min, max, range, examples }) {
   const match = /^([1-9][0-9]{0,5})([mhd])$/.exec(String(value));
   const ms = match ? Number(match[1]) * DURATION_UNITS[match[2]] : Number.NaN;
-  if (!(ms >= MIN_SESSION_LIFETIME_MS && ms <= MAX_SESSION_LIFETIME_MS)) {
-    throw new ArgumentError(`${source} must be a whole number of minutes, hours, or days (for example 90d, 12h, or 30m) from 5m to 400d`);
+  if (!(ms >= min && ms <= max)) {
+    throw new ArgumentError(`${source} must be a whole number of minutes, hours, or days (for example ${examples}) from ${range}`);
   }
   return ms;
+}
+
+export function parseSessionLifetime(value, source = '--session-lifetime') {
+  return parseDuration(value, { source, min: MIN_SESSION_LIFETIME_MS, max: MAX_SESSION_LIFETIME_MS, range: '5m to 400d', examples: '90d, 12h, or 30m' });
+}
+
+export function parseInviteLifetime(value, source = '--invite-lifetime') {
+  return parseDuration(value, { source, min: MIN_INVITE_LIFETIME_MS, max: MAX_INVITE_LIFETIME_MS, range: '5m to 7d', examples: '24h, 3d, or 30m' });
 }
 
 function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
   if (!flags.passkeys) {
     if (flags.rpId !== undefined) throw new ArgumentError('--rp-id requires --passkeys');
     if (flags.sessionLifetime !== undefined) throw new ArgumentError('--session-lifetime requires --passkeys');
-    return { passkeys: false, rpId: null, sessionStore: null, sessionLifetimeMs: null };
+    if (flags.inviteLifetime !== undefined) throw new ArgumentError('--invite-lifetime requires --passkeys');
+    return { passkeys: false, rpId: null, sessionStore: null, sessionLifetimeMs: null, inviteStore: null, inviteLifetimeMs: null };
   }
   if (!auth) throw new ArgumentError('serve --passkeys requires authentication; --passkeys --no-auth is not supported');
   if (!identityStore) throw new ArgumentError('serve --passkeys needs an identity store: pass --identity-store <path> or set HOME or XDG_STATE_HOME');
@@ -83,12 +94,17 @@ function resolvePasskeys(flags, { auth, identityStore, origins, port }) {
   } catch {
     throw new ArgumentError(`--rp-id must be a lowercase domain name with at least two labels, or localhost (not an IP address), and every passkey origin must be https://<rp-id or a subdomain>[:port], or http://localhost[:port] with --rp-id localhost${origins.length ? '' : '; pass --origin for a non-localhost --rp-id'}`);
   }
-  // Sessions live next to the identity store, so they share its directory
-  // checks; the identity store path is already known to be outside the root.
+  // Sessions and invites live next to the identity store, so they share its
+  // directory checks; the identity store path is already known to be outside
+  // the root.
   const sessionStore = path.join(path.dirname(identityStore), SESSIONS_FILE);
-  if (sessionStore === identityStore) throw new ArgumentError(`--identity-store must not be named ${SESSIONS_FILE}; that name is used for the sessions file next to it`);
+  const inviteStore = path.join(path.dirname(identityStore), INVITES_FILE);
+  for (const [file, name, what] of [[sessionStore, SESSIONS_FILE, 'sessions'], [inviteStore, INVITES_FILE, 'invites']]) {
+    if (file === identityStore) throw new ArgumentError(`--identity-store must not be named ${name}; that name is used for the ${what} file next to it`);
+  }
   const sessionLifetimeMs = flags.sessionLifetime === undefined ? DEFAULT_SESSION_LIFETIME_MS : parseSessionLifetime(flags.sessionLifetime);
-  return { passkeys: true, rpId, sessionStore, sessionLifetimeMs };
+  const inviteLifetimeMs = flags.inviteLifetime === undefined ? DEFAULT_INVITE_LIFETIME_MS : parseInviteLifetime(flags.inviteLifetime);
+  return { passkeys: true, rpId, sessionStore, sessionLifetimeMs, inviteStore, inviteLifetimeMs };
 }
 
 export function parseOrigin(value, source = '--origin') {
@@ -122,6 +138,10 @@ function parseArgs(argv) {
       flags.sessionLifetime = takeValue(argv, index, arg);
       index += 1;
     } else if (arg.startsWith('--session-lifetime=')) flags.sessionLifetime = arg.slice('--session-lifetime='.length);
+    else if (arg === '--invite-lifetime') {
+      flags.inviteLifetime = takeValue(argv, index, arg);
+      index += 1;
+    } else if (arg.startsWith('--invite-lifetime=')) flags.inviteLifetime = arg.slice('--invite-lifetime='.length);
     else if (arg === '--origin') {
       flags.origins = [...(flags.origins ?? []), parseOrigin(takeValue(argv, index, arg), '--origin')];
       index += 1;

@@ -1,25 +1,28 @@
-// Same-origin JSON routes for passkey registration and sign-in under
-// /auth/passkey. The transport adapter (serve.mjs) supplies operator
-// authentication for registration and decides what a successful sign-in
-// grants. This module enforces exact Origin, JSON bodies, body limits, rate
-// limits, and the error mapping in docs/passkeys.md.
+// Same-origin JSON routes for passkey registration, invite enrollment, and
+// sign-in under /auth/passkey. The transport adapter (serve.mjs) supplies
+// operator authentication for registration and decides what a successful
+// sign-in grants. This module enforces exact Origin, JSON bodies, body
+// limits, rate limits, and the error mapping in docs/passkeys.md and
+// docs/invites.md.
 import { ChallengeError } from './challenges.mjs';
+import { InviteStoreError } from './invites.mjs';
 import { PasskeyError } from './passkeys.mjs';
-import { IdentityStoreError } from './store.mjs';
+import { IdentityStoreError, isSafeLabel } from './store.mjs';
 import { WebAuthnError } from './webauthn.mjs';
 
 export const PASSKEY_PREFIX = '/auth/passkey';
 const BODY_LIMIT = 64 * 1024;
 const BODY_TIMEOUT_MS = 10000;
 // Token buckets, shared by all clients: a loopback server behind a proxy
-// cannot tell clients apart without trusting forwarded headers. Sign-in and
-// registration have separate buckets, so anonymous sign-in traffic cannot
-// rate-limit the operator out of adding a passkey.
+// cannot tell clients apart without trusting forwarded headers. Sign-in,
+// registration, and invite enrollment have separate buckets, so anonymous
+// sign-in or invite traffic cannot rate-limit the operator out of adding a
+// passkey, or each other.
 const RATES = Object.freeze({
   options: { perMinute: 30, burst: 10 },
   failures: { perMinute: 10, burst: 10 },
 });
-const CEREMONY_BUCKETS = Object.freeze(['login', 'register']);
+const CEREMONY_BUCKETS = Object.freeze(['login', 'register', 'invite']);
 
 export const PASSKEY_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
@@ -159,6 +162,23 @@ const signInError = (error) => {
   return error;
 };
 
+// Invite enrollment: a spent, expired, revoked, unknown, malformed, or
+// mismatched token, and every challenge or verifier failure, look the same,
+// so a response never shows whether an invite exists or why it was refused.
+// Only retryable server conditions differ.
+const INVITE_INVALID = () => new HttpError(400, 'invite_invalid', 'This invite link is not valid. Ask the owner for a new one.');
+const INVITE_REASONS = new Set(['duplicate_id', 'owner_required', 'not_found', 'invalid_argument', 'invalid_id', 'invalid_role', 'user_disabled']);
+
+const inviteError = (error) => {
+  if (error instanceof WebAuthnError || error instanceof ChallengeError || error instanceof PasskeyError) return INVITE_INVALID();
+  if (error instanceof IdentityStoreError || error instanceof InviteStoreError) {
+    if (error.code === 'store_busy') return new HttpError(503, 'store_busy', 'The store is busy; retry shortly.', { 'Retry-After': '2' });
+    if (error.code === 'store_full') return new HttpError(507, 'store_full', 'The identity store is full; ask the owner to remove unused passkeys.');
+    if (error instanceof IdentityStoreError && INVITE_REASONS.has(error.code)) return INVITE_INVALID();
+  }
+  return error;
+};
+
 const challengeIssueError = (error) => (error instanceof ChallengeError
   ? new HttpError(503, error.code, error.message, { 'Retry-After': '10' })
   : error);
@@ -169,8 +189,10 @@ const challengeIssueError = (error) => (error instanceof ChallengeError
  * @param {() => Iterable<string>} options.allowedOrigins Exact origins (config).
  * @param {(req) => boolean} options.isOperator True when the request carries operator auth (registration).
  * @param {(result, context: { origin: string, req: import('node:http').IncomingMessage }) => Record<string, string>} options.onSignIn
- *   Called after a verified sign-in with { userId, role, credentialId, credentialLabel, counter }; returns
- *   extra response headers (e.g. Set-Cookie) or throws HttpError to refuse.
+ *   Called after a verified sign-in with { userId, role, credentialId, credentialLabel, counter }, and after an
+ *   invite enrollment with { userId, role, credentialId, credentialLabel, inviteId }; returns extra response
+ *   headers (e.g. Set-Cookie) or throws HttpError to refuse. After an enrollment a throw does not undo it: the
+ *   response is then 201 with signed_in false.
  * @param {(message: string) => void} [options.log] Receives error codes, never request data.
  * @param {() => number} [options.now] Clock for rate limits (tests).
  */
@@ -195,6 +217,10 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
     if (!isOperator(req)) throw new HttpError(401, 'authentication_required', 'Sign in with the server token before adding a passkey.');
   };
 
+  // The invite token is checked by the invites store; a missing or malformed
+  // one gets the same invite_invalid as any other bad token.
+  const inviteToken = (body) => (typeof body.token === 'string' ? body.token : '');
+
   const verifyFields = (body) => {
     if (typeof body.challenge_id !== 'string' || !body.credential || typeof body.credential !== 'object' || Array.isArray(body.credential)) {
       throw new HttpError(400, 'invalid_request', 'Expected challenge_id and credential.');
@@ -216,6 +242,37 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
   };
 
   const routes = {
+    '/invite/options': async (req) => {
+      checkRequest(req);
+      buckets.invite.options.take();
+      const body = parseJson(await readBody(req));
+      const options = attempt(buckets.invite.failures, () => {
+        try {
+          return ceremonies.startInvitation({ token: inviteToken(body) });
+        } catch (error) {
+          throw challengeIssueError(error);
+        }
+      }, inviteError);
+      return { status: 200, body: { challenge_id: options.challengeId, publicKey: options.publicKey } };
+    },
+    '/invite/verify': async (req) => {
+      const origin = checkRequest(req);
+      const body = parseJson(await readBody(req));
+      const fields = verifyFields(body);
+      const label = body.label === undefined ? '' : body.label;
+      if (!isSafeLabel(label)) throw new HttpError(400, 'invalid_request', 'label must be 0 to 64 characters without control or formatting characters.');
+      const result = attempt(buckets.invite.failures, () => ceremonies.finishInvitation({ ...fields, token: inviteToken(body), label }), inviteError);
+      // The member and passkey exist now. If no session can be created,
+      // they can still sign in from the login page.
+      let headers;
+      try {
+        headers = onSignIn(result, { origin, req });
+      } catch (error) {
+        log(`passkey invite session_not_created${error?.code ? ` (${error.code})` : ''}`);
+        return { status: 201, body: { enrolled: true, signed_in: false, user_id: result.userId } };
+      }
+      return { status: 201, body: { enrolled: true, signed_in: true, user_id: result.userId }, headers };
+    },
     '/register/options': async (req) => {
       checkRequest(req);
       requireOperator(req);
@@ -261,7 +318,7 @@ export const createPasskeyApi = ({ ceremonies, allowedOrigins, isOperator, onSig
   const sendError = (res, error) => {
     if (error instanceof HttpError) return sendJson(res, error.status, { error: { code: error.code, message: error.message } }, error.extra);
     log(`passkey internal_error${error?.code ? ` (${error.code})` : ''}`);
-    if (error instanceof IdentityStoreError) {
+    if (error instanceof IdentityStoreError || error instanceof InviteStoreError) {
       return sendJson(res, 503, { error: { code: 'identity_unavailable', message: 'The identity store is unavailable.' } }, { 'Retry-After': '5' });
     }
     return sendJson(res, 500, { error: { code: 'internal_error', message: 'Internal error.' } });

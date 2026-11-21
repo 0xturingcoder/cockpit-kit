@@ -111,6 +111,17 @@ const checkText = (value, { at, min, max, code }) => {
 export const isSafeLabel = (value) => typeof value === 'string' && value === value.trim()
   && [...value].length <= MAX_LABEL && !CONTROL_RE.test(value) && !FORMAT_RE.test(value);
 
+/**
+ * True when `value` follows the user display-name rules (1 to 128
+ * characters, otherwise the same rules as labels). Invites check a name with
+ * this before the user exists.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export const isSafeDisplayName = (value) => typeof value === 'string' && value === value.trim()
+  && [...value].length >= 1 && [...value].length <= MAX_DISPLAY_NAME && !CONTROL_RE.test(value) && !FORMAT_RE.test(value);
+
 const checkTimestamp = (value, at) => {
   if (typeof value !== 'string' || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
     fail(`${at} must be an ISO 8601 UTC timestamp like 2026-01-02T03:04:05.000Z`);

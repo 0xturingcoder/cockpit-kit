@@ -5,7 +5,11 @@
 //
 // - Registration adds a passkey for the owner. If the store does not exist
 //   yet, the first registration creates the owner. Members get passkeys
-//   through invites (#10), not here.
+//   through invites (invitation, below), not here.
+// - Invitation enrolls a new member from a one-time invite (invites.mjs):
+//   the challenge is bound to the invite and its pre-generated user, the
+//   invite is spent only after the response verifies, and the member and
+//   their first passkey are then written together.
 // - Sign-in is usernameless (discoverable credentials, empty
 //   allowCredentials), so nothing a client sends before signing names a user.
 //   A successful sign-in returns the verified user id; the caller decides
@@ -15,7 +19,7 @@
 //   costs about the same whether or not the id is registered.
 import crypto from 'node:crypto';
 import { createChallengeStore } from './challenges.mjs';
-import { IdentityStoreError, findCredential } from './store.mjs';
+import { IdentityStoreError, findCredential, isSafeLabel } from './store.mjs';
 import { COSE_ALG_ES256, COSE_ALG_RS256, WebAuthnError, normalizeRelyingParty, verifyAuthentication, verifyRegistration } from './webauthn.mjs';
 
 export const DEFAULT_RP_NAME = 'Cockpit';
@@ -69,6 +73,10 @@ const dummyKeyFor = (response) => {
   return typeof signature === 'string' && signature.length >= RSA_SIGNATURE_MIN_CHARS ? keys.rs256 : keys.es256;
 };
 
+// Identity store failures after an invite was spent that leave no user and
+// that the invitee can retry; the invite is put back for them.
+const RETRYABLE_ENROLLMENT = new Set(['store_busy', 'store_full']);
+
 const checkDisplayName = (value) => {
   if (typeof value !== 'string' || value.trim() === '' || value.length > 128) {
     throw new IdentityStoreError('display_name is required to create the owner (1 to 128 characters)', 'invalid_argument');
@@ -84,14 +92,26 @@ const checkDisplayName = (value) => {
  * @param {string} [options.rpName] Shown by the browser during registration.
  * @param {ReturnType<typeof createChallengeStore>} [options.challenges]
  * @param {typeof verifyAuthentication} [options.verify] Sign-in verifier (tests).
+ * @param {import('./invites.mjs').InviteStore} [options.invites] Invites store; without it, invitations are refused.
  */
 export const createPasskeyCeremonies = ({
-  store, rpId, origins, rpName = DEFAULT_RP_NAME, challenges = createChallengeStore(), verify = verifyAuthentication,
+  store, rpId, origins, rpName = DEFAULT_RP_NAME, challenges = createChallengeStore(), verify = verifyAuthentication, invites = null,
 }) => {
   if (!store) throw new TypeError('createPasskeyCeremonies requires an identity store');
   const relyingParty = () => normalizeRelyingParty({ rpId, origins: typeof origins === 'function' ? origins() : origins });
   relyingParty(); // fail at startup on bad config
   getDummyKeys(); // generate before the first sign-in, not during it
+
+  const creationOptions = (binding, issued, exclude) => ({
+    rp: { id: rpId, name: rpName },
+    user: { id: Buffer.from(binding.userId, 'utf8').toString('base64url'), name: binding.displayName, displayName: binding.displayName },
+    challenge: issued.challenge.toString('base64url'),
+    pubKeyCredParams: [{ type: 'public-key', alg: COSE_ALG_ES256 }, { type: 'public-key', alg: COSE_ALG_RS256 }],
+    timeout: challenges.ttlMs,
+    attestation: 'none',
+    authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
+    excludeCredentials: exclude.map((credential) => ({ type: 'public-key', id: credential.id, transports: credential.transports })),
+  });
 
   const startRegistration = ({ displayName } = {}) => {
     const data = loadOrNull(store);
@@ -100,38 +120,100 @@ export const createPasskeyCeremonies = ({
       ? { userId: owner.id, displayName: owner.display_name, createOwner: false }
       : { userId: `usr_${crypto.randomBytes(16).toString('base64url')}`, displayName: checkDisplayName(displayName), createOwner: true };
     const issued = challenges.issue({ ceremony: 'registration', binding });
-    return {
-      challengeId: issued.id,
-      publicKey: {
-        rp: { id: rpId, name: rpName },
-        user: { id: Buffer.from(binding.userId, 'utf8').toString('base64url'), name: binding.displayName, displayName: binding.displayName },
-        challenge: issued.challenge.toString('base64url'),
-        pubKeyCredParams: [{ type: 'public-key', alg: COSE_ALG_ES256 }, { type: 'public-key', alg: COSE_ALG_RS256 }],
-        timeout: challenges.ttlMs,
-        attestation: 'none',
-        authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
-        excludeCredentials: (owner?.credentials ?? []).map((credential) => ({ type: 'public-key', id: credential.id, transports: credential.transports })),
-      },
-    };
+    return { challengeId: issued.id, publicKey: creationOptions(binding, issued, owner?.credentials ?? []) };
   };
 
-  const finishRegistration = ({ challengeId, response, label = '' } = {}) => {
-    const { challenge, binding } = challenges.consume(challengeId, 'registration');
+  // Verify a registration response against a consumed challenge and shape
+  // it for the identity store.
+  const verifiedCredential = (response, challenge, label) => {
     const rp = relyingParty();
     const verified = verifyRegistration({ response, expectedChallenge: challenge, rpId: rp.rpId, origins: [...rp.origins] });
-    const input = {
+    return {
       id: verified.credentialId,
       publicKey: verified.publicKey,
       counter: verified.counter,
       transports: verified.transports,
       label,
     };
+  };
+
+  const finishRegistration = ({ challengeId, response, label = '' } = {}) => {
+    const { challenge, binding } = challenges.consume(challengeId, 'registration');
+    const input = verifiedCredential(response, challenge, label);
     // The owner and their first passkey are written together, so a failed
     // first registration leaves no store behind.
     const credential = binding.createOwner
       ? store.createUserWithCredential({ id: binding.userId, displayName: binding.displayName, role: 'owner', credential: input }).credential
       : store.addCredential(binding.userId, input);
     return Object.freeze({ userId: binding.userId, credentialId: credential.id, createdOwner: binding.createOwner });
+  };
+
+  const inviteInvalid = () => new PasskeyError('invite_invalid', 'The invite is not valid.');
+
+  const requireInvites = () => {
+    if (!invites) throw new PasskeyError('invites_disabled', 'Invites are not enabled.');
+    return invites;
+  };
+
+  /**
+   * Start enrolling the member an invite was created for. The client sends
+   * only the invite token; the user id, name, and role come from the invite.
+   * An unknown, spent, revoked, expired, or malformed token throws
+   * PasskeyError "invite_invalid".
+   */
+  const startInvitation = ({ token } = {}) => {
+    const invite = requireInvites().find(token);
+    if (!invite) throw inviteInvalid();
+    const binding = { inviteId: invite.id, userId: invite.user_id, displayName: invite.display_name };
+    const issued = challenges.issue({ ceremony: 'invitation', binding });
+    return { challengeId: issued.id, publicKey: creationOptions(binding, issued, []) };
+  };
+
+  /**
+   * Finish an invitation: verify the response, claim the invite, create
+   * the member with this passkey in one identity store write, then delete
+   * the invite.
+   *
+   * The token must hash to the invite the challenge was issued for, so a
+   * challenge from one invite cannot be finished with another invite's
+   * token. The invite is claimed under its lock, so concurrent or replayed
+   * finishes cannot both get it, and the pre-generated user id makes the
+   * identity write single-winner as well. A failed verification leaves the
+   * invite pending. If the identity write fails with a retryable error
+   * (store_busy, store_full) no user exists, so the claim is cleared, unless
+   * the owner revoked the invite meanwhile; any other failure leaves it
+   * claimed until the claim lease runs out and it is pruned.
+   *
+   * @returns {Readonly<{ userId: string, role: 'member', credentialId: string, credentialLabel: string, inviteId: string }>}
+   */
+  const finishInvitation = ({ token, challengeId, response, label = '' } = {}) => {
+    const pending = requireInvites();
+    if (!isSafeLabel(label)) throw new PasskeyError('invalid_label', 'The label is not valid.');
+    const { challenge, binding } = challenges.consume(challengeId, 'invitation');
+    const input = verifiedCredential(response, challenge, label);
+    const invite = pending.spend(token, binding.inviteId);
+    if (!invite) throw inviteInvalid();
+    let created;
+    try {
+      created = store.createUserWithCredential({ id: invite.user_id, displayName: invite.display_name, role: 'member', credential: input });
+    } catch (error) {
+      if (error instanceof IdentityStoreError && RETRYABLE_ENROLLMENT.has(error.code)) {
+        try {
+          pending.restore(token, invite.id);
+        } catch {
+          // The invite stays claimed until it is pruned; the owner can create a new one.
+        }
+      }
+      throw error;
+    }
+    try {
+      pending.complete(token, invite.id);
+    } catch {
+      // The member exists. The claim hides the invite until it is pruned.
+    }
+    return Object.freeze({
+      userId: created.user.id, role: created.user.role, credentialId: created.credential.id, credentialLabel: created.credential.label, inviteId: invite.id,
+    });
   };
 
   const startAuthentication = () => {
@@ -190,5 +272,7 @@ export const createPasskeyCeremonies = ({
     });
   };
 
-  return Object.freeze({ startRegistration, finishRegistration, startAuthentication, finishAuthentication });
+  return Object.freeze({
+    startRegistration, finishRegistration, startInvitation, finishInvitation, startAuthentication, finishAuthentication,
+  });
 };

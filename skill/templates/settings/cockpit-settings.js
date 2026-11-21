@@ -1,6 +1,7 @@
-// Devices and sign out for the Cockpit settings page. Same-origin only:
-// reads /auth/account and posts revocations with the session's CSRF token.
-// Builds the page with textContent only. No third-party code.
+// Devices, invites, and sign out for the Cockpit settings page. Same-origin
+// only: reads /auth/account and posts changes with the session's CSRF token.
+// Builds the page with textContent only. A new invite link is shown once and
+// kept only in the page. No third-party code.
 (() => {
   'use strict';
 
@@ -67,6 +68,8 @@
   const signedOut = () => {
     document.getElementById('sessions-section').hidden = true;
     document.getElementById('users-section').hidden = true;
+    document.getElementById('invites-section').hidden = true;
+    hideInviteLink();
     document.getElementById('sign-in-link').hidden = false;
   };
 
@@ -128,6 +131,48 @@
     document.getElementById('users-section').hidden = false;
   };
 
+  const hideInviteLink = () => {
+    document.getElementById('invite-url').value = '';
+    document.getElementById('invite-result').hidden = true;
+  };
+
+  const inviteItem = (invite) => {
+    const item = el('li');
+    item.append(el('strong', invite.display_name));
+    item.append(el('div', `Created ${when(invite.created_at)} · expires ${when(invite.expires_at)}`, 'hint'));
+    item.append(button('Revoke invite', async () => {
+      await request('/invites/revoke', { invite_id: invite.id });
+      setStatus('Invite revoked.');
+      await loadInvites();
+    }));
+    return item;
+  };
+
+  const loadInvites = async () => {
+    const { invites } = await request('/invites');
+    const list = document.getElementById('invites');
+    list.replaceChildren(...invites.map(inviteItem));
+    if (invites.length === 0) list.append(el('li', 'No pending invites.', 'hint'));
+    document.getElementById('invites-section').hidden = false;
+  };
+
+  const createInvite = async (form, submit) => {
+    submit.disabled = true;
+    hideInviteLink();
+    try {
+      const result = await request('/invites', { display_name: form.elements.display_name.value.trim() });
+      document.getElementById('invite-url').value = result.url;
+      document.getElementById('invite-result').hidden = false;
+      form.reset();
+      setStatus(`Invite created for ${result.invite.display_name}. Copy the link now; it is not shown again.`);
+      await loadInvites();
+    } catch (error) {
+      setStatus(error.message || 'Could not create the invite.', true);
+    } finally {
+      submit.disabled = false;
+    }
+  };
+
   const load = async () => {
     let account;
     try {
@@ -145,7 +190,10 @@
     const list = document.getElementById('sessions');
     list.replaceChildren(...account.sessions.map(sessionItem));
     document.getElementById('sessions-section').hidden = false;
-    if (account.user.role === 'owner') renderUsers((await request('/users')).users);
+    if (account.user.role === 'owner') {
+      renderUsers((await request('/users')).users);
+      await loadInvites();
+    }
   };
 
   const init = () => {
@@ -160,6 +208,24 @@
         setStatus(error.message || 'Sign-out failed.', true);
       } finally {
         signOut.disabled = false;
+      }
+    });
+    const inviteForm = document.getElementById('invite-form');
+    inviteForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      createInvite(inviteForm, document.getElementById('invite-create'));
+    });
+    // Do not keep a shown link in the back/forward cache.
+    window.addEventListener('pagehide', hideInviteLink);
+    const copy = document.getElementById('invite-copy');
+    copy.addEventListener('click', async () => {
+      const input = document.getElementById('invite-url');
+      try {
+        await navigator.clipboard.writeText(input.value);
+        setStatus('Invite link copied.');
+      } catch {
+        input.select();
+        setStatus('Select the link and copy it.');
       }
     });
     load().catch((error) => setStatus(error.message || 'Could not load your devices.', true));

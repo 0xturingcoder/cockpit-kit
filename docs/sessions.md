@@ -1,6 +1,6 @@
 # Per-device sessions
 
-Phase 1 of passkeys and identity, after [passkey sign-in](passkeys.md). With `serve.mjs --passkeys`, every passkey sign-in creates its own server-side session. A signed-in user can list their sessions and revoke any of them, including the one they are using, and the owner can list and revoke every user's sessions and passkeys. Without `--passkeys` nothing here is active.
+Phase 1 of passkeys and identity, after [passkey sign-in](passkeys.md). With `serve.mjs --passkeys`, every passkey sign-in creates its own server-side session, and so does a member's enrollment through an [invite](invites.md). A signed-in user can list their sessions and revoke any of them, including the one they are using, and the owner can list and revoke every user's sessions and passkeys. Without `--passkeys` nothing here is active.
 
 ## Summary
 
@@ -31,6 +31,8 @@ Sessions authenticate the user by id. `serve.mjs` checks the cookie on every req
 | Knowledge-repo pages (`GET`/`HEAD`) | yes | yes | yes |
 | `/auth/account` (own sessions, sign out) | yes | yes | no (`401 session_required`); sign-out still clears cookies |
 | `/auth/account/users`, `/auth/account/passkeys/remove` | yes | no (`403 forbidden`) | no |
+| `/auth/account/invites`, `/auth/account/invites/revoke` ([invites](invites.md)) | yes | no (`403 forbidden`) | no (`401 session_required`) |
+| Invite enrollment (`/auth/passkey/invite/*`) | not needed: the invite token in the body authorizes it | not needed | not needed |
 | Passkey registration (`/auth/passkey/register/*`) | no | no | yes, even alongside a session cookie (unchanged; see [Not in this change](#not-in-this-change)) |
 | Intents API with `serve --write` (see below) | yes | no (`403 forbidden`) | yes |
 
@@ -63,28 +65,31 @@ Every request: no query string (`400 invalid_request`). `GET` requests with `Sec
 | `POST /auth/account/sign-out` `{}` | anyone | Revokes the current session (CSRF required when there is one) and clears both `cockpit_session` and `cockpit_serve` with `Max-Age=0`. Without a session it only clears the cookies. |
 | `POST /auth/account/sessions/revoke` `{ session_id }` | any session | Revokes one session. Members can revoke only their own; another user's session returns `404 session_not_found`, exactly like a missing one. Returns `{ revoked: true, current }`, and clears the cookies when `current` is true. |
 | `GET /auth/account/users` | owner | `{ users: [{ id, display_name, role, disabled, created_at, passkeys: [{ id, label, created_at, transports }], sessions: [...] }] }`. No public keys, counters, or token hashes. |
+| `GET /auth/account/invites` | owner | `{ invites: [...] }`: pending invites, without tokens or hashes. See [invites.md](invites.md#routes). |
+| `POST /auth/account/invites` `{ display_name }` | owner | `201 { invite, url }`: a new one-time invite and its link, `<origin>/auth/invite/#<token>`. The only response that contains an invite token. |
+| `POST /auth/account/invites/revoke` `{ invite_id }` | owner | `{ revoked: true }`, or `404 invite_not_found`. |
 | `POST /auth/account/passkeys/remove` `{ credential_id }` | owner | Revokes every session that signed in with the passkey, then removes the passkey (any user's). Returns `{ removed: true, sessions_revoked, current }`. A malformed id, an unknown passkey, and the owner's last passkey (`409 last_passkey`) are refused before anything changes, so a refused request ends no sessions. If the removal then fails (for example `503 store_busy`), the passkey is still there and the request can be retried. |
 
 Each session in a response is `{ id, user_id, credential_id, label, created_at, last_seen_at, expires_at, current }`.
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `invalid_request` | Query string, body not a JSON object, or a malformed `session_id` or `credential_id`. |
+| 400 | `invalid_request` | Query string, body not a JSON object, or a malformed `session_id`, `credential_id`, `invite_id`, or `display_name`. |
 | 401 | `session_required` | No live session (including a request with only the server-token cookie). |
 | 403 | `origin_denied` / `csrf_invalid` / `forbidden` | Wrong Origin or fetch metadata; missing or wrong CSRF token; a member calling an owner route. |
-| 404 | `session_not_found` / `passkey_not_found` / `not_found` | Unknown session (or another user's, for members); unknown passkey; unknown route. |
+| 404 | `session_not_found` / `passkey_not_found` / `invite_not_found` / `not_found` | Unknown session (or another user's, for members); unknown passkey; unknown or no longer pending invite; unknown route. |
 | 405 | `method_not_allowed` | Wrong method. |
-| 409 | `last_passkey` | Removing the owner's only passkey. |
+| 409 | `last_passkey` / `too_many_invites` | Removing the owner's only passkey; creating a 33rd pending invite. |
 | 413 / 415 | `body_too_large` / `unsupported_media_type` | Body over 64 KiB; not `application/json` or compressed. |
 | 503 | `store_busy` | The sessions or identity store lock stayed busy for 1 second. Retry (`Retry-After: 2`). |
 | 503 | `identity_unavailable` | A store file is corrupt or unreadable. |
 | 507 | `store_full` | The sessions store is full. |
 
-Passkey sign-in (`POST /auth/passkey/login/verify`) can also return `503 store_busy` or `503 identity_unavailable` when the session cannot be saved.
+Passkey sign-in (`POST /auth/passkey/login/verify`) can also return `503 store_busy` or `503 identity_unavailable` when the session cannot be saved. Invite enrollment instead returns `201 { enrolled: true, signed_in: false }` in that case, since the member and passkey already exist; they sign in at `/auth/login/`.
 
 ## Settings page
 
-`/auth/settings/` is part of the kit (`skill/templates/settings/`), served before auth like the login page, with the same headers: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and `Cache-Control: no-store`. The page holds no data; its script reads `/auth/account` and lists the signed-in devices with a revoke button each and a **Sign out on this device** button. For the owner it also lists every user with their sessions and passkeys. It builds the page with `textContent` only and loads nothing from other hosts. The login page links to it, and `serve.mjs --passkeys` prints its URL at startup.
+`/auth/settings/` is part of the kit (`skill/templates/settings/`), served before auth like the login page, with the same headers: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and `Cache-Control: no-store`. The page holds no data; its script reads `/auth/account` and lists the signed-in devices with a revoke button each and a **Sign out on this device** button. For the owner it also lists every user with their sessions and passkeys, and has an **Invites** section to create an invite (the link is shown once, in a read-only field with a copy button), list pending invites, and revoke them. It builds the page with `textContent` only and loads nothing from other hosts. The login page links to it, and `serve.mjs --passkeys` prints its URL at startup.
 
 ## Storage and I/O
 
@@ -143,7 +148,7 @@ sessions.revokeCredential(credentialId);
 ## Not in this change
 
 - **The server token is not a session yet.** The tokenized URL still sets the `cockpit_serve` cookie, which is not listed or revocable and lasts for the browser session until the server restarts with a new token. It still authorizes passkey registration, and it is accepted on the intents API with the principal `operator`. Revoking sessions does not sign out a browser that also holds this cookie; **Sign out** on that browser clears it. A browser holding only this cookie cannot use the account API (`401 session_required`), so during recovery it cannot list or revoke sessions; that is tracked in #11, along with registration accepting this cookie alongside a member session (see [What a session grants](#what-a-session-grants)). Making token sign-in an owner-only recovery session that cannot add passkeys without a fresh passkey step-up, its rate limits and audit log, and token rotation are #11.
-- **User administration:** there is no `enableUser`, user removal, or ownership transfer, and the disabled-user rules in the identity store are unchanged. These are left for #11 (recovery) and #10 (invites).
+- **User administration:** members are added through [invites](invites.md). There is no `enableUser`, user removal, or ownership transfer, and the disabled-user rules in the identity store are unchanged; recovery is #11.
 - **Members on the intents API:** refused until verified comment authors and the allowlist (#12).
 - **Per-client rate limits** (#21) and **async store writes** (#20).
 
@@ -151,3 +156,4 @@ sessions.revokeCredential(credentialId);
 
 - `test/sessions.test.mjs`: the store, including hashing, expiry, revocation seen across processes, concurrent sessions, two processes creating sessions at once, throttled and non-blocking last-seen writes, the per-user limit, and fail-closed loading.
 - `test/session-serve.test.mjs`: `serve.mjs` end to end: cookie attributes (`Max-Age`, `Secure` on https), concurrent sessions, revoking another or the current session, sign-out, expiry, no writes per request, member and owner authorization boundaries, passkey removal ending sessions (including when a store write fails, a refused removal, and a passkey removed directly in the store), disabled users, request checks, the settings page headers, the intents routes with session-bound CSRF, a member session winning over the server-token cookie on the intents routes, and `--session-lifetime` parsing.
+- `test/invite-serve.test.mjs` covers the invite routes and the session an enrollment creates (see [invites.md, Tests](invites.md#tests)).
