@@ -204,6 +204,12 @@ function sessionCookie(token, secure) {
   return `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/${secure ? '; Secure' : ''}`;
 }
 
+// Secure when every configured origin is https, so the cookie is never sent
+// over plain http. Without --origin the server is reached over http.
+function tokenCookieSecure(config) {
+  return Boolean(config.origins?.length) && config.origins.every((origin) => origin.startsWith('https:'));
+}
+
 function boundPort(server, config) {
   const address = server.address();
   return typeof address === 'object' && address ? address.port : config.port;
@@ -279,7 +285,7 @@ export function createServeServer(config, { token = crypto.randomBytes(32).toStr
       if (urlToken && timingSafeEqual(urlToken, token)) {
         // Set the cookie and redirect to the token-free URL so the secret
         // does not linger in the address bar, history, or same-origin Referer.
-        res.setHeader('Set-Cookie', sessionCookie(token, false));
+        res.setHeader('Set-Cookie', sessionCookie(token, tokenCookieSecure(config)));
         res.writeHead(302, { Location: String(req.url ?? '/').split('?')[0] || '/' });
         return res.end();
       }

@@ -43,7 +43,7 @@ node skill/scripts/serve.mjs --root /path/to/knowledge-repo --passkeys \
   --rp-id example.com --origin https://cockpit.example.com
 ```
 
-The proxy must still present a loopback `Host` header, as for any `serve.mjs` request. On an `https` origin the session cookie gets the `Secure` attribute.
+The proxy must still present a loopback `Host` header, as for any `serve.mjs` request. On an `https` origin the passkey session cookie gets the `Secure` attribute. The cookie set by the tokenized URL gets it too when every configured `--origin` is `https`.
 
 ## Ceremonies
 
