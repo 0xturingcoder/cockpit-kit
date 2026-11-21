@@ -317,6 +317,54 @@ test('load refuses group/world-accessible files and symlinks', posixOnly, () => 
   assertRejects(() => openIdentityStore({ file: link, root }).load(), 'unsafe_file');
 });
 
+test('load checks and reads the file it opened, not whatever is at the path later', posixOnly, (t) => {
+  const { base, file, root } = makeLayout();
+  const store = openIdentityStore({ file, root });
+  writeDoc(file, validDoc());
+  const swapped = validDoc();
+  swapped.users.push({ ...swapped.users[1], id: 'usr_member002' });
+  const other = path.join(base, 'other.json');
+  writeDoc(other, swapped, 0o644);
+  const realOpen = fs.openSync;
+  t.mock.method(fs, 'openSync', (...args) => {
+    const fd = realOpen(...args);
+    // Swap a world-readable file in right after the store is opened.
+    if (args[0] === file) fs.renameSync(other, file);
+    return fd;
+  });
+  assert.equal(store.load().users.length, 2, 'the opened file was read and checked');
+  t.mock.restoreAll();
+  assertRejects(() => store.load(), 'unsafe_permissions');
+});
+
+test('load bounds the bytes it reads, even if fstat reports a small size', (t) => {
+  const { file, root } = makeLayout();
+  const store = openIdentityStore({ file, root });
+  writeDoc(file, `{"pad": "${'x'.repeat(MAX_FILE_BYTES)}"}`);
+  assert.match(assertRejects(() => store.load(), 'invalid_store').message, /larger than 1048576 bytes/);
+  const realFstat = fs.fstatSync;
+  t.mock.method(fs, 'fstatSync', (...args) => Object.assign(realFstat(...args), { size: 10 }));
+  assert.match(assertRejects(() => store.load(), 'invalid_store').message, /larger than 1048576 bytes/);
+});
+
+test('load maps open failures to unsafe_file or unreadable without leaking paths', posixOnly, () => {
+  const { file, root } = makeLayout();
+  const store = openIdentityStore({ file, root });
+  fs.mkdirSync(file, { recursive: true });
+  assertRejects(() => store.load(), 'unsafe_file', [file]);
+  fs.rmdirSync(file);
+
+  fs.symlinkSync(path.join(path.dirname(file), 'missing-target.json'), file);
+  assertRejects(() => store.load(), 'unsafe_file', [file]);
+  fs.rmSync(file);
+
+  writeDoc(file, validDoc(), 0o000);
+  if (process.getuid?.() !== 0) {
+    const error = assertRejects(() => store.load(), 'unreadable', [file, path.dirname(file)]);
+    assert.equal(error.message, 'Identity store is unreadable');
+  }
+});
+
 test('a failed mutation leaves the previous file byte-for-byte and no temp files', () => {
   const { file, store, owner } = seeded();
   const before = fs.readFileSync(file);

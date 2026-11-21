@@ -348,21 +348,66 @@ export const assertOutsideRoot = (file, root, source = 'identity store') => {
   return file;
 };
 
-const readStoreFile = (file) => {
-  let stat;
+const NOT_REGULAR = 'Identity store must be a regular file, not a symlink';
+
+const openStoreFile = (file) => {
+  if (!fs.constants.O_NOFOLLOW) {
+    // No O_NOFOLLOW on this platform (Windows): refuse a symlink up front.
+    let stat;
+    try {
+      stat = fs.lstatSync(file);
+    } catch (error) {
+      if (error.code === 'ENOENT') fail('Identity store does not exist yet; create the owner first', 'missing');
+      fail('Identity store is unreadable', 'unreadable');
+    }
+    if (stat.isSymbolicLink()) fail(NOT_REGULAR, 'unsafe_file');
+  }
   try {
-    stat = fs.lstatSync(file);
+    return fs.openSync(file, READ_FLAGS);
   } catch (error) {
     if (error.code === 'ENOENT') fail('Identity store does not exist yet; create the owner first', 'missing');
-    fail('Identity store is unreadable', 'unreadable');
+    // O_NOFOLLOW on a symlink fails with ELOOP (EMLINK on some BSDs).
+    if (error.code === 'ELOOP' || error.code === 'EMLINK') fail(NOT_REGULAR, 'unsafe_file');
+    // Node's own message includes the absolute path; do not pass it through.
+    return fail('Identity store is unreadable', 'unreadable');
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) fail('Identity store must be a regular file, not a symlink', 'unsafe_file');
-  if (CHECK_MODE && (stat.mode & 0o077) !== 0) fail('Identity store must not be accessible by group or others (chmod 600)', 'unsafe_permissions');
-  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) fail('Identity store must be owned by the service user', 'unsafe_permissions');
-  if (stat.size > MAX_FILE_BYTES) fail(`Identity store is larger than ${MAX_FILE_BYTES} bytes`);
+};
+
+const readAtMost = (fd, limit) => {
+  const buffer = Buffer.alloc(limit);
+  let length = 0;
+  while (length < limit) {
+    const count = fs.readSync(fd, buffer, length, limit - length, length);
+    if (count === 0) break;
+    length += count;
+  }
+  return buffer.subarray(0, length);
+};
+
+// Open once without following symlinks, check what was actually opened
+// (fstat), and read from that same descriptor, so the path cannot be
+// swapped between the checks and the read.
+const readStoreFile = (file) => {
+  const fd = openStoreFile(file);
+  let bytes;
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) fail(NOT_REGULAR, 'unsafe_file');
+    if (CHECK_MODE && (stat.mode & 0o077) !== 0) fail('Identity store must not be accessible by group or others (chmod 600)', 'unsafe_permissions');
+    if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) fail('Identity store must be owned by the service user', 'unsafe_permissions');
+    if (stat.size > MAX_FILE_BYTES) fail(`Identity store is larger than ${MAX_FILE_BYTES} bytes`);
+    bytes = readAtMost(fd, MAX_FILE_BYTES + 1);
+  } catch (error) {
+    if (error instanceof IdentityStoreError) throw error;
+    fail('Identity store is unreadable', 'unreadable');
+  } finally {
+    fs.closeSync(fd);
+  }
+  // The file may have grown after fstat; the bound applies to what was read.
+  if (bytes.length > MAX_FILE_BYTES) fail(`Identity store is larger than ${MAX_FILE_BYTES} bytes`);
   let parsed;
   try {
-    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    parsed = JSON.parse(bytes.toString('utf8'));
   } catch {
     // JSON.parse messages can quote file content; do not pass them through.
     fail('Identity store is not valid JSON');
