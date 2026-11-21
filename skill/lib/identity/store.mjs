@@ -88,7 +88,6 @@ const sleep = (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
 // Checks take an error code: on-disk data fails with the default
 // "invalid_store", caller input with ARG ("invalid_argument"), so callers can
 // tell bad client input from a corrupt store.
-
 const ARG = 'invalid_argument';
 
 const checkKeys = (value, allowed, at) => {
@@ -443,7 +442,7 @@ const fsyncDir = (dir) => {
 const serialize = (data) => {
   const text = `${JSON.stringify(data, null, 2)}\n`;
   if (Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES) {
-    fail(`Identity store would exceed ${MAX_FILE_BYTES} bytes; remove unused users or credentials first`, 'store_full');
+    fail(`Identity store would exceed ${MAX_FILE_BYTES} bytes; remove unused credentials first`, 'store_full');
   }
   return text;
 };
