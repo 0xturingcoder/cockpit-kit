@@ -79,8 +79,9 @@ function assertRejects(fn, code, secrets = []) {
   } catch (error) {
     caught = error;
   }
+  assert.ok(code, 'assertRejects needs the expected error code');
   assert.ok(caught instanceof IdentityStoreError, `expected IdentityStoreError, got ${caught}`);
-  if (code) assert.equal(caught.code, code, caught.message);
+  assert.equal(caught.code, code, caught.message);
   for (const secret of secrets) assert.ok(!caught.message.includes(secret), `error message echoes stored material: ${caught.message}`);
   return caught;
 }
@@ -144,10 +145,10 @@ test('createUser rejects a second owner, unknown roles, bad names, and duplicate
   assertRejects(() => store.createUser({ displayName: 'Test Member', id: owner.id }), 'duplicate_id');
   assertRejects(() => store.createUser({ displayName: 'Test Member', id: 'bad id!' }), 'invalid_id');
   assertRejects(() => store.createUser({ displayName: 'short', id: 'usr_1' }), 'invalid_id');
-  assertRejects(() => store.createUser({ displayName: '' }));
-  assertRejects(() => store.createUser({ displayName: ' Padded ' }));
-  assertRejects(() => store.createUser({ displayName: 'Line\nbreak' }));
-  assertRejects(() => store.createUser({ displayName: 'x'.repeat(129) }));
+  assert.match(assertRejects(() => store.createUser({ displayName: '' }), 'invalid_argument').message, /1 to 128 characters/);
+  assert.match(assertRejects(() => store.createUser({ displayName: ' Padded ' }), 'invalid_argument').message, /whitespace/);
+  assert.match(assertRejects(() => store.createUser({ displayName: 'Line\nbreak' }), 'invalid_argument').message, /control characters/);
+  assert.match(assertRejects(() => store.createUser({ displayName: 'x'.repeat(129) }), 'invalid_argument').message, /1 to 128 characters/);
   const named = store.createUser({ displayName: 'Test Guest', id: 'usr_guest0001' });
   assert.equal(named.id, 'usr_guest0001');
   assert.equal(store.load().users.length, 3);
@@ -210,16 +211,16 @@ test('addCredential rejects duplicate ids across users and bad input without ech
   assertRejects(() => store.addCredential(owner.id, credential({ id: 'A'.repeat(1400) })), 'invalid_argument');
   assertRejects(() => store.addCredential(owner.id, credential({ id: new Uint8Array(0) })), 'invalid_argument');
   assertRejects(() => store.addCredential(owner.id, credential({ id: 12345 })), 'invalid_argument');
-  assertRejects(() => store.addCredential(owner.id, credential({ id: crypto.randomBytes(1024) })));
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ id: crypto.randomBytes(1024) })), 'invalid_argument').message, /at most 1023 bytes/);
   assertRejects(() => store.addCredential(owner.id, credential({ publicKey: crypto.randomBytes(32).fill(0x04, 0, 1) })), 'invalid_argument', secrets);
   assertRejects(() => store.addCredential(owner.id, credential({ publicKey: Buffer.from([0x04, 1, 2]).toString('base64url') })), 'invalid_argument');
-  assertRejects(() => store.addCredential(owner.id, credential({ counter: -1 })));
-  assertRejects(() => store.addCredential(owner.id, credential({ counter: 1.5 })));
-  assertRejects(() => store.addCredential(owner.id, credential({ transports: ['USB'] })));
-  assertRejects(() => store.addCredential(owner.id, credential({ transports: ['usb', 'usb'] })));
-  assertRejects(() => store.addCredential(owner.id, credential({ transports: 'usb' })));
-  assertRejects(() => store.addCredential(owner.id, credential({ label: 'x'.repeat(65) })));
-  assertRejects(() => store.addCredential(owner.id, credential({ label: 'tab\there' })));
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ counter: -1 })), 'invalid_argument').message, /integer from 0/);
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ counter: 1.5 })), 'invalid_argument').message, /integer from 0/);
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ transports: ['USB'] })), 'invalid_argument').message, /lowercase transport/);
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ transports: ['usb', 'usb'] })), 'invalid_argument').message, /repeat a transport/);
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ transports: 'usb' })), 'invalid_argument').message, /array of at most 8/);
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ label: 'x'.repeat(65) })), 'invalid_argument').message, /0 to 64 characters/);
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ label: 'tab\there' })), 'invalid_argument').message, /control characters/);
   assert.equal(store.load().users[0].credentials.length, 1);
 });
 
@@ -233,8 +234,8 @@ test('updateCounter only moves forward and never echoes credential ids', () => {
   assertRejects(() => store.updateCounter(counted.id, 1000), 'counter_regression', [counted.id]);
   assertRejects(() => store.updateCounter(counted.id, 3), 'counter_regression', [counted.id]);
   assertRejects(() => store.updateCounter(counted.id, 0), 'counter_regression', [counted.id]);
-  assertRejects(() => store.updateCounter(counted.id, 2 ** 32));
-  assertRejects(() => store.updateCounter(counted.id, '1001'));
+  assert.match(assertRejects(() => store.updateCounter(counted.id, 2 ** 32), 'invalid_argument').message, /integer from 0/);
+  assert.match(assertRejects(() => store.updateCounter(counted.id, '1001'), 'invalid_argument').message, /integer from 0/);
   assert.equal(findCredential(store.load(), counted.id).credential.counter, 1000);
 
   // Authenticators without a counter always report 0.
@@ -411,8 +412,8 @@ test('load maps open failures to unsafe_file or unreadable without leaking paths
 test('a failed mutation leaves the previous file byte-for-byte and no temp files', () => {
   const { file, store, owner } = seeded();
   const before = fs.readFileSync(file);
-  assertRejects(() => store.createUser({ displayName: 'Second Owner', role: 'owner' }));
-  assertRejects(() => store.addCredential(owner.id, credential({ transports: ['bad transport'] })));
+  assertRejects(() => store.createUser({ displayName: 'Second Owner', role: 'owner' }), 'owner_required');
+  assert.match(assertRejects(() => store.addCredential(owner.id, credential({ transports: ['bad transport'] })), 'invalid_argument').message, /lowercase transport/);
   assert.deepEqual(fs.readFileSync(file), before);
   assert.deepEqual(tempFiles(path.dirname(file)), []);
 });
