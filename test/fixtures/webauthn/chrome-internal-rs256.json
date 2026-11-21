@@ -1,0 +1,69 @@
+{
+  "provenance": {
+    "browser": "Google Chrome",
+    "browser_version": "156.0.8078.47",
+    "os": "Linux x86_64",
+    "authenticator": "Chrome virtual authenticator, platform (internal), RS256",
+    "captured": "2026-11-21",
+    "method": "Recorded from a real Google Chrome browser calling navigator.credentials.create() and get() on https://example.com (resolved to a local test server). The authenticator is Chrome's built-in CTAP2 virtual authenticator (DevTools WebAuthn domain, transport internal, user verification on), not a physical device.",
+    "notes": "Invented user (Ada Example). Random user id and challenges generated for the capture. No real origins or identifiers."
+  },
+  "rp_id": "example.com",
+  "origin": "https://example.com",
+  "user": {
+    "id": "z373op2iaM2v3Q9nKY75zA",
+    "name": "ada.example",
+    "display_name": "Ada Example"
+  },
+  "registration": {
+    "challenge": "r43QH3w3-blotoLcfwBUrD9Rsj8F-0S1B8yXQHrm1UQ",
+    "response": {
+      "id": "VQIRRpyIrgdjP_SxHZ7tteT34TvcGzA2ZF8aUaUItjs",
+      "rawId": "VQIRRpyIrgdjP_SxHZ7tteT34TvcGzA2ZF8aUaUItjs",
+      "type": "public-key",
+      "response": {
+        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoicjQzUUgzdzMtYmxvdG9MY2Z3QlVyRDlSc2o4Ri0wUzFCOHlYUUhybTFVUSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+        "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVkBZ6N5pvbur7mlXjeMEYA04nUeaC-rny0wqxPSElWGzhlHRQAAAAEBAgMEBQYHCAECAwQFBgcIACBVAhFGnIiuB2M_9LEdnu215PfhO9wbMDZkXxpRpQi2O6QBAwM5AQAgWQEA4Wy5CG4lDDf4jBo6oY4h2jQw9rZkEFE_rryIJ03xRq20wV8ESrr7R_qGQFfkTPNJCZf-_FVv7PmqQZhC4RPySIlb5eFpXlQXZXVUsuGE-aWZ8oKT3XqLDVcnLYVO3wq07fPLO9bDoLRW9ZzxcT8CL0YuvzXpFvHHMKofeZ-Oh-qRr_Zjz6HNFIe7g0psmtzaQlJUdTRKAzqGWEhfz1gkSozlmIMcofaNjRmW_nLjOci9kZo1FWP4Oeh0yMYa-KL9k-UdGow6HR8cLtdrIFwwP8VDMBBgta7ITVrvQgfJEDQ9jj1qS-SBHCK5N7vKjzKshOJ4ErptVnU3RBFGSSu9xSFDAQAB",
+        "transports": [
+          "internal"
+        ]
+      },
+      "authenticatorAttachment": "platform",
+      "clientExtensionResults": {}
+    }
+  },
+  "authentications": [
+    {
+      "challenge": "ZIEZIJ-oM7g86ckVi3yM0lBR_Umy9qWxcx56Oh6bK14",
+      "response": {
+        "id": "VQIRRpyIrgdjP_SxHZ7tteT34TvcGzA2ZF8aUaUItjs",
+        "rawId": "VQIRRpyIrgdjP_SxHZ7tteT34TvcGzA2ZF8aUaUItjs",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWklFWklKLW9NN2c4NmNrVmkzeU0wbEJSX1VteTlxV3hjeDU2T2g2YksxNCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAg",
+          "signature": "0PaXoHKSUSmGahVwqVhaC92_5sCiN9jenVcXMLM5Ol3LFp-OUr-ihZ7kjaA4hQpoeUJwaFAgZzToAXGxw4uywi5zOdJzwKopYjF5O8_Ns6AcltEFe0NHnk61FeHUcgXSVZ5YTrYsH1xFD7wKVc-7984meSB0G-LDuvZGuEpXfZxEctxEiAs9pxUVjWDQ0BieLfVJuezRwQbm7PQvM-BwXf-22Biu71CgVkbs2CIJ0PwUjm8j7mTvFdfovOpErtzL2s7csx9Z-13hwHs8R7uEZOrXGwBshjyp-xXwkMOjKaFWZL5JZ6511w04Ymo35CnoVTB4nrFOtKdE4FwAzi5_5Q",
+          "userHandle": "z373op2iaM2v3Q9nKY75zA"
+        },
+        "authenticatorAttachment": "platform",
+        "clientExtensionResults": {}
+      }
+    },
+    {
+      "challenge": "wj6WI_pv83WvPANHbvST6Z15Lbj4Zkw-CImDNdSO6PA",
+      "response": {
+        "id": "VQIRRpyIrgdjP_SxHZ7tteT34TvcGzA2ZF8aUaUItjs",
+        "rawId": "VQIRRpyIrgdjP_SxHZ7tteT34TvcGzA2ZF8aUaUItjs",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoid2o2V0lfcHY4M1d2UEFOSGJ2U1Q2WjE1TGJqNFprdy1DSW1ETmRTTzZQQSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2UsIm90aGVyX2tleXNfY2FuX2JlX2FkZGVkX2hlcmUiOiJkbyBub3QgY29tcGFyZSBjbGllbnREYXRhSlNPTiBhZ2FpbnN0IGEgdGVtcGxhdGUuIFNlZSBodHRwczovL2dvby5nbC95YWJQZXgifQ",
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAw",
+          "signature": "KgUEmANrq2Z3ks485Y0nZsJsh5hNqM4RdQC3OTOPkYvCUy-HZSEJhHpAO4FmnXAzDvwfT1cqDtlP1XtN_PNnuLW-RpZFthGnbwNsmtv9LxcqU7KJeYXX0VypWcMpMRR8VBayJxhNuQmfJN2ZoRfdQAgecCH8-InJgZRbTgss9216bsxrvhLTqaDBIMsr9aJ9xotTpG5cYIU0zz2P2PoPhiYGwfDUF8QFguJDAlbxyuBfpdq4FNzPcI4ZtOWdcKGZQW7_xOm_J3W7qL_SK-E7HUn7_Dl5Qft3NRqGjh4rQ3pBGOSV0O5_6RQu6sll4mixqXzv5ERVS5MuHIbFgat-tA",
+          "userHandle": "z373op2iaM2v3Q9nKY75zA"
+        },
+        "authenticatorAttachment": "platform",
+        "clientExtensionResults": {}
+      }
+    }
+  ]
+}

@@ -194,5 +194,10 @@ ceremonies.finishAuthentication({ challengeId, response })        // { userId, r
 
 - `test/cbor.test.mjs`: the decoder, including malformed, truncated, non-minimal, oversized, and deeply nested input, and a mutation fuzz loop.
 - `test/webauthn.test.mjs`: the verifier with synthetic ES256 and RS256 credentials generated at runtime, and one negative test per item in #8.
-- `test/passkeys.test.mjs`: challenges, ceremonies with a real identity store, HTTP error mapping, rate limits, the login page CSP, and `serve.mjs` end to end.
-- `test/webauthn-fixtures.test.mjs`: recorded real-browser fixtures from `test/fixtures/webauthn/*.json` (format in that folder's README). It skips when there are none and also runs its harness on a synthetic fixture.
+- `test/passkey-ceremonies.test.mjs`: challenges and ceremonies with a real identity store, including the unknown-credential dummy verification.
+- `test/passkey-serve.test.mjs`: HTTP error mapping, rate limits, the login page CSP, and `serve.mjs` end to end.
+- `test/webauthn-fixtures.test.mjs`: recorded real-browser fixtures from `test/fixtures/webauthn/*.json`, plus its harness run on a synthetic fixture.
+
+### Recorded fixtures
+
+`test/fixtures/webauthn/` holds six recordings from real browsers on Linux: Google Chrome 156 (ES256 and RS256) and Mozilla Firefox 160 (ES256 only; its software token has no RS256), each with a platform (`internal`) and a roaming (`usb`) authenticator. The browsers really ran `navigator.credentials.create()` and `get()` on `https://example.com` (routed to a local test server) and produced the `clientDataJSON`, attestation objects, authenticator data, and signatures. The authenticators were each browser's built-in virtual (software) authenticator: Chrome's DevTools WebAuthn domain, and Firefox's WebDriver WebAuthn extension through geckodriver with its software token. They are not physical devices, so the fixtures prove interoperability with real browser WebAuthn stacks, not with any particular hardware. No fixture was edited after capture. The capture scripts are in `tools/webauthn-capture/` (development tools, not part of the kit and not run in CI). Fixtures from physical authenticators, for example a platform authenticator on another OS or a hardware security key, can be added later in the same format.

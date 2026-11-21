@@ -7,7 +7,8 @@
 // The expected challenge comes from the fixture (injected), since challenge
 // issuing is a separate layer. When the folder has no fixtures, the
 // per-fixture test is skipped; the harness itself is still exercised below
-// with a synthetic fixture built at runtime.
+// with a synthetic fixture built at runtime. Provenance of the recorded
+// fixtures (real browsers, virtual authenticators) is in that README.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -148,6 +149,11 @@ const runFixture = (fixture, name) => {
   if (finalCounter !== 0) {
     rejectsWith(() => verifyAuthentication(firstArgs({ credential: stored() })), 'counter_regression', `${name}: replay after the counter moved on`);
   }
+  // Equal counter: a stored counter equal to the response's is refused too.
+  const firstCounter = Buffer.from(first.response.response.authenticatorData, 'base64url').readUInt32BE(33);
+  if (firstCounter !== 0) {
+    rejectsWith(() => verifyAuthentication(firstArgs({ credential: { ...stored(), counter: firstCounter } })), 'counter_regression', `${name}: equal counter`);
+  }
 
   // Wrong ceremony: a registration clientDataJSON cannot sign in.
   const crossed = structuredClone(first.response);
@@ -171,10 +177,26 @@ if (fixtureFiles.length === 0) {
   test('recorded real-browser WebAuthn fixtures verify', { skip: `no recorded fixtures in ${path.relative(process.cwd(), fixtureDir) || fixtureDir} yet` }, () => {});
 }
 
+const loadFixture = (file) => JSON.parse(fs.readFileSync(path.join(fixtureDir, file), 'utf8'));
+
 for (const file of fixtureFiles) {
   test(`recorded fixture ${file}: registration, authentications in order, and negative mutations`, () => {
-    const fixture = JSON.parse(fs.readFileSync(path.join(fixtureDir, file), 'utf8'));
-    runFixture(fixture, file);
+    runFixture(loadFixture(file), file);
+  });
+}
+
+if (fixtureFiles.length > 0) {
+  test('recorded fixtures cover at least two browsers and both ES256 and RS256', () => {
+    const fixtures = fixtureFiles.map(loadFixture);
+    const browsers = new Set(fixtures.map((fixture) => fixture.provenance.browser));
+    assert.ok(browsers.size >= 2, `browsers: ${[...browsers].join(', ')}`);
+    const algs = new Set(fixtures.map((fixture) => verifyRegistration({
+      response: fixture.registration.response,
+      expectedChallenge: Buffer.from(fixture.registration.challenge, 'base64url'),
+      rpId: fixture.rp_id,
+      origins: [fixture.origin],
+    }).alg));
+    assert.deepEqual([...algs].sort((a, b) => a - b), [-257, -7]);
   });
 }
 
