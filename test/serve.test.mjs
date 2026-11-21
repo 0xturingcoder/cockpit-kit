@@ -127,6 +127,23 @@ test('serve enforces token-then-cookie flow and supports --no-auth behavior', as
   });
 });
 
+test('the tokenized-URL cookie is Secure only when every configured origin is https', async () => {
+  const root = fs.realpathSync.native(makeRoot());
+  const tokenCookie = async (origins) => {
+    let cookie;
+    await withServer({ root, host: '127.0.0.1', port: 0, auth: true, ...(origins ? { origins } : {}) }, async ({ port, token }) => {
+      const res = await request({ port, path: `/?token=${token}` });
+      assert.equal(res.status, 302);
+      [cookie] = res.headers['set-cookie'];
+    });
+    return cookie;
+  };
+  assert.equal(await tokenCookie(['https://cockpit.example.com', 'https://example.com:8443']), 'cockpit_serve=test-token; HttpOnly; SameSite=Strict; Path=/; Secure');
+  assert.equal(await tokenCookie(['https://cockpit.example.com', 'http://localhost:18766']), 'cockpit_serve=test-token; HttpOnly; SameSite=Strict; Path=/');
+  assert.equal(await tokenCookie([]), 'cockpit_serve=test-token; HttpOnly; SameSite=Strict; Path=/');
+  assert.equal(await tokenCookie(undefined), 'cockpit_serve=test-token; HttpOnly; SameSite=Strict; Path=/');
+});
+
 test('serve resolves folder URLs to index.html', async () => {
   const root = makeRoot();
   await withServer({ root: fs.realpathSync.native(root), host: '127.0.0.1', port: 0, auth: false }, async ({ port }) => {

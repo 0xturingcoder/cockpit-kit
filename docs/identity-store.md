@@ -2,7 +2,7 @@
 
 Phase 1 of passkeys and identity. The store records who may sign in to a Cockpit: users, their role, and the passkey (WebAuthn) credentials each user has registered. Later features (passkey sign-in, sessions, invites) read identities only through the API below, so the JSON file can be swapped for a small database without changing callers.
 
-This phase adds the store and its validation only. Nothing verifies passkeys or serves a login page yet.
+Passkey registration and sign-in ([`passkeys.md`](passkeys.md), `serve.mjs --passkeys`) use this store: registration calls `createUserWithCredential` (for the first owner) or `addCredential`, and sign-in calls `load`, `findCredential`, and `updateCounter`.
 
 ## Location
 
@@ -14,11 +14,11 @@ One private JSON file per knowledge repo. The path comes from the serve config, 
 
 Configured paths must be absolute or start with `~/`. `parseServeConfig()` returns the result as `identityStore` and refuses to start if the path is inside the served root. The default path is checked the same way, so an `XDG_STATE_HOME` or `HOME` inside the root is refused too. `openIdentityStore()` checks again. Both checks compare the resolved path, so `..` segments cannot lead back into the root, and the real path, so a symlinked directory that points at the root is refused too. A path that goes through the root is also refused, even if a symlink inside the root leads somewhere else.
 
-If no path is configured and neither `HOME` nor `XDG_STATE_HOME` is set, `identityStore` is `null`. Callers, starting with passkey sign-in (#8), must treat `null` as "identity disabled" and fail closed: no sign-in, and never a fallback location.
+If no path is configured and neither `HOME` nor `XDG_STATE_HOME` is set, `identityStore` is `null`. Callers must treat `null` as "identity disabled" and fail closed: no sign-in, and never a fallback location. `serve.mjs --passkeys` refuses to start in that case.
 
-**Behavior change:** `serve.mjs` refuses to start when the identity store path resolves inside the served root, even though nothing uses identity yet. This includes the default path, so a served root at or above `$HOME` (or above `XDG_STATE_HOME`) stops `serve.mjs` from starting. Fix it by serving a narrower root, or by pointing `--identity-store` (or `identity_store`) at a path outside the root. This is deliberate: the store holds credentials and must never be servable.
+**Behavior change:** `serve.mjs` refuses to start when the identity store path resolves inside the served root, with or without `--passkeys`. This includes the default path, so a served root at or above `$HOME` (or above `XDG_STATE_HOME`) stops `serve.mjs` from starting. Fix it by serving a narrower root, or by pointing `--identity-store` (or `identity_store`) at a path outside the root. This is deliberate: the store holds credentials and must never be servable.
 
-**Trust:** `identity_store` in `.cockpit/serve.toml` is trusted the same way `auth` is there. That file lives in the knowledge repo, so anyone who can write to the repo can point the server at a different store after a restart. #8 may accept this setting only from the command line or the user config.
+**Trust:** `identity_store` in `.cockpit/serve.toml` is trusted the same way `auth` is there. That file lives in the knowledge repo, so anyone who can write to the repo can point the server at a different store after a restart. For that reason `serve.mjs --passkeys` refuses an `identity_store` from `.cockpit/serve.toml`: with passkeys on, the store path must come from `--identity-store` or the default location. Without `--passkeys` the setting is still accepted, because nothing signs in with the store then.
 
 ## File safety
 
@@ -112,6 +112,7 @@ const hit = findCredential(data, credential.id); // { user, credential } or null
 | `openIdentityStore({ file, root, now?, lockWaitMs?, lockStaleMs? })` | Checks that `file` is absolute and outside `root`, then returns a frozen store object. Nothing is read or written yet. `now` is an optional clock for tests. `lockWaitMs` (default 5000) is how long a change waits for a busy lock, and `lockStaleMs` (default 30000) is the age after which a lock counts as abandoned. |
 | `store.load()` | Reads and fully validates the file. Returns a copy of the document. Throws `missing` if the file does not exist. |
 | `store.createUser({ displayName, role = 'member', id? })` | Adds an enabled user with no credentials. The first user must be the `owner`, and creating it creates the file. A second owner is refused. |
+| `store.createUserWithCredential({ displayName, role = 'member', id?, credential })` | `createUser` and `addCredential` in one locked write, returning `{ user, credential }`. If either step fails (for example a bad label, a duplicate credential id, or `store_busy`), nothing is written, so a user is never left without the credential. The first owner can be created this way. |
 | `store.addCredential(userId, { id, publicKey, counter = 0, transports = [], label = '' })` | Registers a credential for an enabled user. The credential id must not exist for any user. |
 | `store.updateCounter(credentialId, counter)` | Stores a newer signature counter. The counter only moves forward: a value less than or equal to the stored one throws `counter_regression`, which the caller should treat as a possibly cloned authenticator. `0` to `0` is accepted without writing, because authenticators without a counter always report 0. Refused for disabled users. |
 | `store.removeCredential(credentialId)` | Removes the credential and returns it. Allowed for disabled users. |
@@ -120,7 +121,7 @@ const hit = findCredential(data, credential.id); // { user, credential } or null
 | `validateIdentityData(data)` | Validates a whole document (used by `load()` and before every write). |
 | `assertOutsideRoot(file, root)` | The path check used by the store and the serve config. |
 
-The API is synchronous. A change that finds the lock busy blocks the calling thread until the lock frees up or `lockWaitMs` passes (5 seconds by default). In `serve.mjs` that blocks the event loop, so passkey sign-in (#8) should keep changes such as `updateCounter` off the hot path, or account for the wait. `load()` takes no lock and does not wait.
+The API is synchronous. A change that finds the lock busy blocks the calling thread until the lock frees up or `lockWaitMs` passes (5 seconds by default). In `serve.mjs` that blocks the event loop, so `serve.mjs --passkeys` opens the store with `lockWaitMs` of 1 second: sign-in's `updateCounter` (skipped when the counter stays 0) and registration's writes wait at most that long, and a busy store becomes a retryable `503 store_busy`. `load()` takes no lock and does not wait.
 
 Every function returns plain copies. Changing a returned object does not change the store. Callers decide policy: for example, sign-in code must check `user.disabled` after `findCredential()`.
 

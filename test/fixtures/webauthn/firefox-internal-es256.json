@@ -1,0 +1,69 @@
+{
+  "provenance": {
+    "browser": "Mozilla Firefox",
+    "browser_version": "160.0.1",
+    "os": "Linux x86_64",
+    "authenticator": "Firefox virtual authenticator, platform (internal), ES256",
+    "captured": "2026-11-21",
+    "method": "Recorded from a real Mozilla Firefox browser calling navigator.credentials.create() and get() on https://example.com (routed to a local test server). The authenticator is Firefox's WebDriver virtual authenticator (WebDriver WebAuthn extension via geckodriver, CTAP2, transport internal, user verification on), not a physical device. Firefox prefs: security.webauth.webauthn_enable_softtoken=true, security.webauth.webauthn_enable_usbtoken=false.",
+    "notes": "Invented user (Ada Example). Random user id and challenges generated for the capture. The first sign-in lists the credential in allowCredentials; the second is usernameless (empty allowCredentials), as the server does. No real origins or identifiers."
+  },
+  "rp_id": "example.com",
+  "origin": "https://example.com",
+  "user": {
+    "id": "sVtBPaOOUGWHsN18LJdvCw",
+    "name": "ada.example",
+    "display_name": "Ada Example"
+  },
+  "registration": {
+    "challenge": "UJhBtsqN5Dbg1SubB9O0NpHRHX71vREz27Y_jl5wWqY",
+    "response": {
+      "authenticatorAttachment": "platform",
+      "clientExtensionResults": {},
+      "id": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+      "rawId": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+      "response": {
+        "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViko3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUdFAAAAAGjhAKULR5EEuFSXqbpRBjgAICwpIZxZamABxu1tQLIf4tOAUQTCfKy1Q47B2V50K_-2pQECAyYgASFYIE-6UpPYNwN0OJ9SsVJTf9ogAdygQc_vmNbYLW6Nmr6BIlggQUoswm6xkE5MvghwAuVYx1ydzG6Ov5NJBzCagHTo_3M",
+        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiVUpoQnRzcU41RGJnMVN1YkI5TzBOcEhSSFg3MXZSRXoyN1lfamw1d1dxWSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+        "transports": [
+          "internal"
+        ]
+      },
+      "type": "public-key"
+    }
+  },
+  "authentications": [
+    {
+      "challenge": "AH-qUFeLQOmhxAz8pCtzkLheXz8HqTfK1I3e19z-ZjA",
+      "response": {
+        "authenticatorAttachment": "platform",
+        "clientExtensionResults": {},
+        "id": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+        "rawId": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+        "response": {
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAQ",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQUgtcVVGZUxRT21oeEF6OHBDdHprTGhlWHo4SHFUZksxSTNlMTl6LVpqQSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEUCIF3AjG7NDIfYMH7oNesaPlror3FMslm4Ng-YUFPmz9K7AiEA50uSZ-Wagw-FI8feWL0LyR0U6GJIgUEPk2GvV5pZcGY",
+          "userHandle": "sVtBPaOOUGWHsN18LJdvCw"
+        },
+        "type": "public-key"
+      }
+    },
+    {
+      "challenge": "CBFQNJsu1imsKru2Ts9UJC_2Wq88biYf3vxMNZaVGsU",
+      "response": {
+        "authenticatorAttachment": "platform",
+        "clientExtensionResults": {},
+        "id": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+        "rawId": "LCkhnFlqYAHG7W1Ash_i04BRBMJ8rLVDjsHZXnQr_7Y",
+        "response": {
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAg",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQ0JGUU5Kc3UxaW1zS3J1MlRzOVVKQ18yV3E4OGJpWWYzdnhNTlphVkdzVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEUCIQDEIrk8iXo14EdtNKqvzfjR9AXH1yNiuzMozvQtrWh4mgIgKkBKl9muBZNtaPbWGbDBAM0LZQvkaagWNpTkFzAmWLQ",
+          "userHandle": "sVtBPaOOUGWHsN18LJdvCw"
+        },
+        "type": "public-key"
+      }
+    }
+  ]
+}

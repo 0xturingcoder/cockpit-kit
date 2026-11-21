@@ -1,0 +1,69 @@
+{
+  "provenance": {
+    "browser": "Google Chrome",
+    "browser_version": "156.0.8078.47",
+    "os": "Linux x86_64",
+    "authenticator": "Chrome virtual authenticator, roaming security key (usb), ES256",
+    "captured": "2026-11-21",
+    "method": "Recorded from a real Google Chrome browser calling navigator.credentials.create() and get() on https://example.com (resolved to a local test server). The authenticator is Chrome's built-in CTAP2 virtual authenticator (DevTools WebAuthn domain, transport usb, user verification on), not a physical device.",
+    "notes": "Invented user (Ada Example). Random user id and challenges generated for the capture. The first sign-in lists the credential in allowCredentials; the second is usernameless (empty allowCredentials), as the server does. No real origins or identifiers."
+  },
+  "rp_id": "example.com",
+  "origin": "https://example.com",
+  "user": {
+    "id": "DLbW1Eb_QwjPx30lBBdo_A",
+    "name": "ada.example",
+    "display_name": "Ada Example"
+  },
+  "registration": {
+    "challenge": "b1x7whRXAVeCip7b1VZRsL_ue_Pqgz0Soq1V_BK5Rm4",
+    "response": {
+      "id": "M7hnlA9ONfgKDeWmr78GALK2BSHvlHKV5LpzlZlPaFU",
+      "rawId": "M7hnlA9ONfgKDeWmr78GALK2BSHvlHKV5LpzlZlPaFU",
+      "type": "public-key",
+      "response": {
+        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiYjF4N3doUlhBVmVDaXA3YjFWWlJzTF91ZV9QcWd6MFNvcTFWX0JLNVJtNCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+        "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViko3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUdFAAAAAQAAAAAAAAAAAAAAAAAAAAAAIDO4Z5QPTjX4Cg3lpq-_BgCytgUh75RyleS6c5WZT2hVpQECAyYgASFYIOu4Qyk_Jpv8N3vBwmzGx7yA7uWD2eb-icDeIP3BrXLzIlggQEKzCbQh-GUtPMirVYOEHlbm0P61OAwkvJgs-BPKDiE",
+        "transports": [
+          "usb"
+        ]
+      },
+      "authenticatorAttachment": "cross-platform",
+      "clientExtensionResults": {}
+    }
+  },
+  "authentications": [
+    {
+      "challenge": "e0HwxLnmdLBiZzZY2XKcb_EA94a2mSOs6fv4hjRG9oQ",
+      "response": {
+        "id": "M7hnlA9ONfgKDeWmr78GALK2BSHvlHKV5LpzlZlPaFU",
+        "rawId": "M7hnlA9ONfgKDeWmr78GALK2BSHvlHKV5LpzlZlPaFU",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZTBId3hMbm1kTEJpWnpaWTJYS2NiX0VBOTRhMm1TT3M2ZnY0aGpSRzlvUSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAg",
+          "signature": "MEQCICdTCHHDZUfGAERbpEJKcNZb30K8Ilj4h7LSggFVufSPAiA0vU3rvTQ5wXbXPu2234AOgvNy-HY-DTirSWXohslk4w",
+          "userHandle": "DLbW1Eb_QwjPx30lBBdo_A"
+        },
+        "authenticatorAttachment": "cross-platform",
+        "clientExtensionResults": {}
+      }
+    },
+    {
+      "challenge": "CBrLo6nBvU9yJcy3FQIdTr55uR6IPlSQFg-qwrwqFe4",
+      "response": {
+        "id": "M7hnlA9ONfgKDeWmr78GALK2BSHvlHKV5LpzlZlPaFU",
+        "rawId": "M7hnlA9ONfgKDeWmr78GALK2BSHvlHKV5LpzlZlPaFU",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiQ0JyTG82bkJ2VTl5SmN5M0ZRSWRUcjU1dVI2SVBsU1FGZy1xd3J3cUZlNCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS5jb20iLCJjcm9zc09yaWdpbiI6ZmFsc2UsIm90aGVyX2tleXNfY2FuX2JlX2FkZGVkX2hlcmUiOiJkbyBub3QgY29tcGFyZSBjbGllbnREYXRhSlNPTiBhZ2FpbnN0IGEgdGVtcGxhdGUuIFNlZSBodHRwczovL2dvby5nbC95YWJQZXgifQ",
+          "authenticatorData": "o3mm9u6vuaVeN4wRgDTidR5oL6ufLTCrE9ISVYbOGUcFAAAAAw",
+          "signature": "MEUCIDCLlP2SFJrqD6o39-PaVv-9Bd9c8rYgOIF5nEZvbOoiAiEA0-RJO_92rhEBwPs9XJojR1-9kBd-NP4y1wDr34iqCuM",
+          "userHandle": "DLbW1Eb_QwjPx30lBBdo_A"
+        },
+        "authenticatorAttachment": "cross-platform",
+        "clientExtensionResults": {}
+      }
+    }
+  ]
+}
