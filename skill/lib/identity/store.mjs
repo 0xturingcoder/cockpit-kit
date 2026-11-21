@@ -13,6 +13,8 @@
 //   fsynced, then renamed over the store, so a reader sees the old file or
 //   the new one, never a partial one. Mutations hold a short directory lock
 //   and re-read the file first, so concurrent writers do not lose updates.
+// - A write whose serialized size exceeds the 1 MiB load cap is refused
+//   ("store_full") before anything is written.
 // - Loading fails closed: a symlink, a file another user owns, a file with
 //   any group/world permission bit, invalid JSON, an unknown field, a bad or
 //   duplicate id, an unknown role, or anything other than exactly one owner
@@ -28,7 +30,13 @@ export const IDENTITY_SCHEMA_VERSION = 1;
 export const IDENTITY_STORE_FILE = 'identity.json';
 export const ROLES = Object.freeze(['owner', 'member']);
 
-const MAX_FILE_BYTES = 1024 * 1024;
+// The serialized file is capped at 1 MiB, and this cap is the binding limit.
+// The per-field limits below bound each record but do not add up to a store
+// that fits: one credential at the field maxima takes about 4.5 KB (about 230
+// fit), a typical passkey about 0.4 KB (about 2,500 fit). A write that would
+// exceed the cap is refused with "store_full" and nothing is written, so the
+// store always stays loadable.
+export const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_USERS = 1000;
 const MAX_CREDENTIALS_PER_USER = 32;
 // WebAuthn credential ids are at most 1023 bytes.
@@ -369,13 +377,22 @@ const fsyncDir = (dir) => {
   }
 };
 
-const writeStoreFile = (file, data) => {
+// Serialize before touching the disk, and refuse anything load() would refuse.
+const serialize = (data) => {
+  const text = `${JSON.stringify(data, null, 2)}\n`;
+  if (Buffer.byteLength(text, 'utf8') > MAX_FILE_BYTES) {
+    fail(`Identity store would exceed ${MAX_FILE_BYTES} bytes; remove unused users or credentials first`, 'store_full');
+  }
+  return text;
+};
+
+const writeStoreFile = (file, text) => {
   const dir = path.dirname(file);
   const temp = path.join(dir, `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
   const fd = fs.openSync(temp, 'wx', 0o600);
   try {
     try {
-      fs.writeFileSync(fd, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+      fs.writeFileSync(fd, text, 'utf8');
       fs.fchmodSync(fd, 0o600);
       fs.fsyncSync(fd);
     } finally {
@@ -458,7 +475,7 @@ export const openIdentityStore = ({ file, root, now = Date.now } = {}) => {
         current = EMPTY;
       }
       const { data, result, unchanged } = transform(current);
-      if (!unchanged) writeStoreFile(storeFile, validateIdentityData(data));
+      if (!unchanged) writeStoreFile(storeFile, serialize(validateIdentityData(data)));
       return clone(result);
     });
   };

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  IDENTITY_SCHEMA_VERSION, IdentityStoreError, assertOutsideRoot, findCredential, findUser, openIdentityStore, validateIdentityData,
+  IDENTITY_SCHEMA_VERSION, IdentityStoreError, MAX_FILE_BYTES, assertOutsideRoot, findCredential, findUser, openIdentityStore, validateIdentityData,
 } from '../skill/lib/identity/store.mjs';
 import { parseServeConfig } from '../skill/lib/serve-config.mjs';
 import { writeConfig } from '../skill/lib/config.mjs';
@@ -340,6 +340,50 @@ test('writes fsync a temp file, and a failed rename keeps the old file intact', 
   assert.equal(store.load().users[0].credentials.length, 0);
   store.addCredential(owner.id, credential());
   assert.equal(store.load().users[0].credentials.length, 1);
+});
+
+test('a write over the 1 MiB cap is refused with store_full and the store stays usable', () => {
+  const { file, root } = makeLayout();
+  const store = openIdentityStore({ file, root });
+  const serializedBytes = (doc) => Buffer.byteLength(`${JSON.stringify(doc, null, 2)}\n`);
+  // Credentials at the per-field maxima: 1023-byte ids and 2048-byte keys.
+  const bigCredential = () => ({
+    id: crypto.randomBytes(1023).toString('base64url'),
+    public_key: Buffer.concat([Buffer.from([0xa5]), crypto.randomBytes(2047)]).toString('base64url'),
+    counter: 0, transports: ['usb'], created_at: '2026-01-02T03:04:05.000Z', label: 'Test key',
+  });
+  const doc = validDoc();
+  doc.users[0].credentials = [];
+  for (let index = 0; ; index += 1) {
+    let user = doc.users.at(-1);
+    if (user.role === 'owner' || user.credentials.length === 32) {
+      user = { id: `usr_member${String(index).padStart(4, '0')}`, display_name: 'Test Member', role: 'member', disabled: false, created_at: '2026-01-02T03:04:05.000Z', credentials: [] };
+      doc.users.push(user);
+    }
+    user.credentials.push(bigCredential());
+    // Each one serializes to about 4.5 KB. Re-serializing the whole document
+    // every step is slow, so measure exactly only near the cap.
+    if ((index + 1) * 4400 > MAX_FILE_BYTES - 32 * 1024 && serializedBytes(doc) > MAX_FILE_BYTES) {
+      user.credentials.pop();
+      break;
+    }
+  }
+  writeDoc(file, JSON.stringify(doc, null, 2));
+  assert.ok(fs.statSync(file).size <= MAX_FILE_BYTES);
+  const before = fs.readFileSync(file);
+  const loaded = store.load();
+  const owner = loaded.users[0];
+
+  const big = { id: crypto.randomBytes(1023), publicKey: Buffer.concat([Buffer.from([0xa5]), crypto.randomBytes(2047)]), transports: ['usb'], label: 'Test key' };
+  const error = assertRejects(() => store.addCredential(owner.id, big), 'store_full');
+  assert.match(error.message, /1048576 bytes/);
+  assert.deepEqual(fs.readFileSync(file), before);
+  assert.deepEqual(tempFiles(path.dirname(file)), []);
+
+  // The previous file still loads and can still be changed.
+  const victim = loaded.users.at(-1).credentials[0];
+  assert.equal(store.removeCredential(victim.id).id, victim.id);
+  assert.equal(findCredential(store.load(), victim.id), null);
 });
 
 test('a stale lock left by a crashed writer is cleared', () => {

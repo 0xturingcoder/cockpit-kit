@@ -19,6 +19,7 @@ Configured paths must be absolute or start with `~/`. `parseServeConfig()` retur
 - **Owner-only:** a new store directory is created with mode `0700` (an existing directory is left alone). The file is always written with mode `0600`.
 - **Atomic writes:** each change goes to an exclusive temp file in the same directory (`0600`). The temp file is fsynced and renamed over the store, then the directory is fsynced where the platform allows it. Readers see the old file or the new one, never a partial one. If any step fails, the temp file is removed and the old file stays as it was.
 - **One writer at a time:** each change holds a short directory lock (`<file>.lock`), re-reads the file, applies the change, validates the result, and writes it. Concurrent writers (for example the server and a CLI) do not lose each other's updates. A lock older than 30 seconds counts as abandoned and is cleared.
+- **Size cap (1 MiB):** `load()` refuses a file larger than 1 MiB (1,048,576 bytes). Every change is serialized first, and a change that would make the file larger than that is refused with `store_full` before anything is written. The previous file stays loadable, and removing credentials or users still works. The cap, not the per-field limits below, is the binding limit. One credential at the field maxima (1023-byte id, 2048-byte key) takes about 4.5 KB, so about 230 fit. A typical passkey (32-byte id, P-256 key) takes about 0.4 KB, so about 2,500 fit.
 - **Permissions are enforced, not repaired:** loading refuses a symlink, a non-regular file, a file owned by another user, or a file with any group or world permission bit. Fix it with `chmod 600 <file>`; the store never widens or silently repairs permissions. On Windows, mode bits are not checked.
 - **Fails closed:** invalid JSON, an unknown or missing field, an unsupported `schema_version`, a bad or duplicate id, an unknown role, or anything other than exactly one owner makes `load()` and every change throw. A missing file is an error too (`missing`) until the owner is created.
 - **No credential material in errors:** messages name fields by position (`users[0].credentials[1].id`) and never include ids, public keys, or file content. `JSON.parse` messages are not passed through, because they can quote the file.
@@ -72,6 +73,8 @@ Credential fields:
 | `created_at` | ISO 8601 UTC timestamp. |
 | `label` | Operator-facing name for the device, 0 to 64 characters, no control characters. |
 
+The per-field limits (1000 users, 32 credentials per user, and the sizes above) bound each record. The whole file must also fit in 1 MiB, and that cap is reached first (see [File safety](#file-safety)).
+
 Unknown fields are rejected at every level. Any future change to the format bumps `schema_version`.
 
 ## API (`skill/lib/identity/store.mjs`)
@@ -114,7 +117,8 @@ Failures throw `IdentityStoreError` with a stable `code`:
 | Code | Meaning |
 | --- | --- |
 | `missing` | The file does not exist yet. |
-| `invalid_store` | Invalid JSON, a missing or unknown field, or a value out of range. |
+| `invalid_store` | Invalid JSON, a missing or unknown field, a value out of range, or a file larger than 1 MiB. |
+| `store_full` | The change would make the file larger than 1 MiB. Nothing was written. |
 | `unsupported_schema` | `schema_version` is not `1`. |
 | `invalid_id` / `invalid_role` | A malformed user id, or a role other than `owner` / `member`. |
 | `duplicate_id` | A user id or credential id that already exists. |
